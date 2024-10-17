@@ -530,4 +530,4 @@ import threading
 if __name__ == "__main__":
     # Launch Gradio with share=True in a separate thread
     threading.Thread(target=launch_gradio).start()
-    uvicorn.run(app, port=7861, host="0.0.0.0")
+    uvicorn.run(app, port=8000, host="0.0.0.0")
