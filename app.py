@@ -118,12 +118,19 @@ async def logout(request: Request):
 async def login(request: Request):
     root_url = gr.route_utils.get_root_url(request, "/login", None)
     redirect_uri = request.url_for("auth")  # f"{root_url}/auth"
+    print("-----------in login")
+    print("root_urlt", root_url)
+    print("redirect_uri", redirect_uri)
+    print("request", request)
     return await oauth.kadi4mat.authorize_redirect(request, redirect_uri)
 
 
 @app.route("/auth")
 async def auth(request: Request):
-    # root_url = gr.route_utils.get_root_url(request, "/auth", None)
+    root_url = gr.route_utils.get_root_url(request, "/auth", None)
+    print("*****+ in auth")
+    print("root_urlt", root_url)
+    print("request", request)
     try:
         access_token = await oauth.kadi4mat.authorize_access_token(request)
         request.session["user_access_token"] = access_token["access_token"]
