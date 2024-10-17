@@ -118,7 +118,7 @@ async def logout(request: Request):
 async def login(request: Request):
     root_url = gr.route_utils.get_root_url(request, "/login", None)
     redirect_uri = request.url_for("auth")  # f"{root_url}/auth"
-    redirect_uri = redirect_uri._replace(scheme='https')
+    redirect_uri = redirect_uri.replace(scheme='https')
     print("-----------in login")
     print("root_urlt", root_url)
     print("redirect_uri", redirect_uri)
