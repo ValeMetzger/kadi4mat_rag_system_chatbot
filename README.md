@@ -3,6 +3,7 @@ title: KadiChat
 emoji: 🏆
 colorFrom: blue
 colorTo: purple
+sdk: gradio
 sdk_version: 4.21.0
 python_version: 3.10.4
 app_file: start.py
