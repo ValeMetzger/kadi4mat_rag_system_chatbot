@@ -1,0 +1,11 @@
+uvicorn
+fastapi
+authlib
+httpx
+gradio
+pymupdf
+sentence-transformers
+faiss-cpu
+python-dotenv
+itsdangerous
+kadi-apy
