@@ -529,4 +529,4 @@ app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_us
 if __name__ == "__main__":
     # Launch Gradio with share=True in a separate thread
     # threading.Thread(target=launch_gradio).start()
-    uvicorn.run(app, port=7860)#, host="localhost")
+    uvicorn.run(app, port=7860, host="0.0.0.0")
