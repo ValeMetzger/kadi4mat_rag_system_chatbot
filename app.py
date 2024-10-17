@@ -454,7 +454,7 @@ with gr.Blocks() as main_demo:
     _state_user_token = gr.State([])
 
     user_session_rag = gr.State(
-        "placeholder", time_to_live=3600
+        "placeholder"#, time_to_live=3600
     )  # clean state after 1h
     
     with gr.Row():
