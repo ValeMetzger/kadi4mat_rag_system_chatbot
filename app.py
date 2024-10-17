@@ -51,7 +51,7 @@ app = FastAPI()
 oauth = OAuth()
 
 # Set Kadi instance
-instance = "my_kadi_demo_instance"  # "demo kit instance"
+instance = "my_instance"  # "demo kit instance"
 host = "https://demo-kadi4mat.iam.kit.edu"
 
 base_url = host
