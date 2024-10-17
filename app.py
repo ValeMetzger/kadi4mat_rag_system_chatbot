@@ -228,7 +228,7 @@ def _init_user_token(request: gr.Request):
     return user_token
 
 
-with gr.Blocks(theme=gr.themes.Ocean()) as login_demo:
+with gr.Blocks() as login_demo:
     gr.Markdown(
             """<br/><br/><br/><br/><br/><br/><br/><br/>
             <center>
@@ -448,7 +448,7 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 app = gr.mount_gradio_app(app, login_demo, path="/main")
 
 # Gradio interface
-with gr.Blocks(theme=gr.themes.Ocean()) as main_demo:
+with gr.Blocks() as main_demo:
 
     # State for storing user token
     _state_user_token = gr.State([])
