@@ -521,13 +521,13 @@ with gr.Blocks(theme=gr.themes.Ocean()) as main_demo:
 app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
 
 
-def launch_gradio():
-    login_demo.launch(server_port=7860, share=True)
+#def launch_gradio():
+#    login_demo.launch(server_port=7860, share=True)
 
 
 import threading
 
 if __name__ == "__main__":
     # Launch Gradio with share=True in a separate thread
-    threading.Thread(target=launch_gradio).start()
-    uvicorn.run(app, port=8000, host="0.0.0.0")
+    # threading.Thread(target=launch_gradio).start()
+    uvicorn.run(app, port=7860, host="0.0.0.0")
