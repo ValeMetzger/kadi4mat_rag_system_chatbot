@@ -522,7 +522,7 @@ app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_us
 
 
 def launch_gradio():
-    login_demo.launch(port=7860, share=True)
+    login_demo.launch(server_port=7860, share=True)
 
 
 import threading
