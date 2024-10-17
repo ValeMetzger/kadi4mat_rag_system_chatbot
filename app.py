@@ -98,6 +98,7 @@ def get_user(request: Request):
 @app.get("/")
 def public(request: Request, user=Depends(get_user)):
     root_url = gr.route_utils.get_root_url(request, "/", None)
+    print("root url", root_url)
     if user:
         return RedirectResponse(url=f"{root_url}/gradio/")
     else:
