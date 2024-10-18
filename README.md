@@ -1,5 +1,5 @@
 ---
-title: KadiChatTest
+title: KadiChat
 emoji: 🏆
 colorFrom: blue
 colorTo: purple
