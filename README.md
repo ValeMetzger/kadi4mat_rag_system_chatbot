@@ -1,6 +1,6 @@
 ---
 title: KadiChat
-emoji: 🏆
+emoji: 💬
 colorFrom: blue
 colorTo: purple
 sdk: gradio
