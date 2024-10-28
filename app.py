@@ -7,34 +7,35 @@ Ref: https://kadi.readthedocs.io/en/stable/httpapi/intro.html#oauth2-tokens
 Notes:
 1. register an application in Kadi (Setting->Applications)
     - Name: KadiOAuthTest
-    - Website URL: http://127.0.0.1:8000
-    - Redirect URIs: http://localhost:8000/auth
+    - Website URL: http://127.0.0.1:7860
+    - Redirect URIs: http://localhost:7860/auth
     
 And you will get Client ID and Client Secret, note them down and set in this file.
 
-2. Start this app, and open browser with address "http://localhost:8000/"
-
+2. Start this app, and open browser with address "http://localhost:7860/"
+  - if you are starting this app on Huggingface, use "start.py" instead.
 """
 
 import json
-
 import uvicorn
+import gradio as gr
+import kadi_apy
+import pymupdf
+import numpy as np
+import faiss
+import os
+import tempfile
+import pymupdf
 from fastapi import FastAPI, Depends
 from starlette.responses import RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 from authlib.integrations.starlette_client import OAuth, OAuthError
 from fastapi import Request
-import gradio as gr
-import kadi_apy
 from kadi_apy import KadiManager
 from requests.compat import urljoin
 from typing import List, Tuple
-import pymupdf
 from sentence_transformers import SentenceTransformer
-import numpy as np
-import faiss
 from dotenv import load_dotenv
-import os
 
 # Kadi OAuth settings
 load_dotenv()
@@ -44,6 +45,7 @@ SECRET_KEY = os.environ["SECRET_KEY"]
 huggingfacehub_api_token = os.environ["huggingfacehub_api_token"]
 
 from huggingface_hub import login
+
 login(token=huggingfacehub_api_token)
 
 # Set up OAuth
@@ -54,6 +56,7 @@ oauth = OAuth()
 instance = "my_instance"  # "demo kit instance"
 host = "https://demo-kadi4mat.iam.kit.edu"
 
+# Register oauth
 base_url = host
 oauth.register(
     name="kadi4mat",
@@ -70,15 +73,22 @@ oauth.register(
 
 # Global LLM client
 from huggingface_hub import InferenceClient
+
 client = InferenceClient("meta-llama/Meta-Llama-3-8B-Instruct")
 
+# Mixed-usage of huggingface client and local model for showing 2 possibilities
+embeddings_client = InferenceClient(
+    model="sentence-transformers/all-mpnet-base-v2", token=huggingfacehub_api_token
+)
+embeddings_model = SentenceTransformer(
+    "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
+)
 
-embeddings_client = InferenceClient(model="sentence-transformers/all-mpnet-base-v2", token=huggingfacehub_api_token)
-# embeddings_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", trust_remote_code=True)  # unused
-embeddings_model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2", trust_remote_code=True)
 
 # Dependency to get the current user
 def get_user(request: Request):
+    """Validate and get user information."""
+
     if "user_access_token" in request.session:
         token = request.session["user_access_token"]
     else:
@@ -97,14 +107,17 @@ def get_user(request: Request):
 
 @app.get("/")
 def public(request: Request, user=Depends(get_user)):
+    """Main extrance of app."""
+
     root_url = gr.route_utils.get_root_url(request, "/", None)
-    print("root url", root_url)
+    # print("root url", root_url)
     if user:
         return RedirectResponse(url=f"{root_url}/gradio/")
     else:
         return RedirectResponse(url=f"{root_url}/main/")
 
 
+# Logout
 @app.route("/logout")
 async def logout(request: Request):
     request.session.pop("user", None)
@@ -114,24 +127,26 @@ async def logout(request: Request):
     return RedirectResponse(url="/")
 
 
+# Login
 @app.route("/login")
 async def login(request: Request):
     root_url = gr.route_utils.get_root_url(request, "/login", None)
     redirect_uri = request.url_for("auth")  # f"{root_url}/auth"
-    redirect_uri = redirect_uri.replace(scheme='https')
-    print("-----------in login")
-    print("root_urlt", root_url)
-    print("redirect_uri", redirect_uri)
-    print("request", request)
+    redirect_uri = redirect_uri.replace(scheme="https")  # required by Kadi
+    # print("-----------in login")
+    # print("root_urlt", root_url)
+    # print("redirect_uri", redirect_uri)
+    # print("request", request)
     return await oauth.kadi4mat.authorize_redirect(request, redirect_uri)
 
 
+# Get auth
 @app.route("/auth")
 async def auth(request: Request):
     root_url = gr.route_utils.get_root_url(request, "/auth", None)
-    print("*****+ in auth")
-    print("root_urlt", root_url)
-    print("request", request)
+    # print("*****+ in auth")
+    # print("root_urlt", root_url)
+    # print("request", request)
     try:
         access_token = await oauth.kadi4mat.authorize_access_token(request)
         request.session["user_access_token"] = access_token["access_token"]
@@ -144,10 +159,13 @@ async def auth(request: Request):
 
 
 def greet(request: gr.Request):
+    """Show greeting message."""
+
     return f"Welcome to Kadichat, you're logged in as: {request.username}"
 
 
 def get_files_in_record(record_id, user_token, top_k=10):
+    """Get all file list within one record."""
 
     manager = KadiManager(instance=instance, host=host, pat=user_token)
 
@@ -192,6 +210,7 @@ def get_files_in_record(record_id, user_token, top_k=10):
 
 
 def get_all_records(user_token):
+    """Get all record list in Kadi."""
 
     if not user_token:
         return []
@@ -233,13 +252,16 @@ def get_all_records(user_token):
 
 
 def _init_user_token(request: gr.Request):
+    """Init user token."""
+
     user_token = request.request.session["user_access_token"]
     return user_token
 
 
+# Landing page for login
 with gr.Blocks() as login_demo:
     gr.Markdown(
-            """<br/><br/><br/><br/><br/><br/><br/><br/>
+        """<br/><br/><br/><br/><br/><br/><br/><br/>
             <center>
             <h1>Welcome to KadiChat!</h1>
             <br/><br/>
@@ -247,7 +269,7 @@ with gr.Blocks() as login_demo:
             <br/><br/>
             Chat with Record in Kadi.</center>
             """
-        )
+    )
     # Note: kadichat-logo is hosted on https://postimage.io/
 
     with gr.Row():
@@ -257,7 +279,7 @@ with gr.Blocks() as login_demo:
             btn = gr.Button("Sign in with Kadi (demo-instance)")
         with gr.Column():
             _btn_placeholder2 = gr.Button(visible=False)
-    
+
     gr.Markdown(
         """<br/><br/><br/><br/>
             <center>
@@ -274,87 +296,92 @@ with gr.Blocks() as login_demo:
     """
     btn.click(None, js=_js_redirect)
 
-import tempfile
-import os
-import pymupdf
 
+# A simple RAG implementation
 class SimpleRAG:
     def __init__(self) -> None:
         self.documents = []
         self.embeddings_model = None
         self.embeddings = None
         self.index = None
-        #self.load_pdf("Brandt et al_2024_Kadi_info_page.pdf")
-        #self.build_vector_db()
+        # self.load_pdf("Brandt et al_2024_Kadi_info_page.pdf")
+        # self.build_vector_db()
 
     def load_pdf(self, file_path: str) -> None:
         """Extracts text from a PDF file and stores it in the property documents by page."""
+
         doc = pymupdf.open(file_path)
         self.documents = []
         for page_num in range(len(doc)):
             page = doc[page_num]
             text = page.get_text()
             self.documents.append({"page": page_num + 1, "content": text})
-        print("PDF processed successfully!")
-        
+        # print("PDF processed successfully!")
 
     def build_vector_db(self) -> None:
         """Builds a vector database using the content of the PDF."""
         if self.embeddings_model is None:
-            self.embeddings_model = SentenceTransformer("jinaai/jina-embeddings-v2-small-en", trust_remote_code=True)  # jinaai/jina-embeddings-v2-base-de?
-        # Use embeddings_client
-        print("now doing embedding")
-        print("len of documents", len(self.documents))
-        import time
-        start =time.time()
-        #embedding_responses = embeddings_client.post(json={"inputs":[doc["content"] for doc in self.documents]}, task="feature-extraction")
-        #self.embeddings = np.array(json.loads(embedding_responses.decode()))
-        self.embeddings = self.embeddings_model.encode([doc["content"] for doc in self.documents], show_progress_bar=True)
-        end = time.time()
-        print("cost time", end-start)
+            self.embeddings_model = SentenceTransformer(
+                "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
+            )  # jinaai/jina-embeddings-v2-base-de?
+
+        # Use local model
+        # print("now doing embedding")
+        # print("len of documents", len(self.documents))
+        # embedding_responses = embeddings_client.post(json={"inputs":[doc["content"] for doc in self.documents]}, task="feature-extraction")
+        # self.embeddings = np.array(json.loads(embedding_responses.decode()))
+        self.embeddings = self.embeddings_model.encode(
+            [doc["content"] for doc in self.documents], show_progress_bar=True
+        )
         self.index = faiss.IndexFlatL2(self.embeddings.shape[1])
         self.index.add(np.array(self.embeddings))
         print("Vector database built successfully!")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
+
+        # Use embeddings_client
         # query_embedding = self.embeddings_model.encode([query], show_progress_bar=False)
-        embedding_responses = embeddings_client.post(json={"inputs": [query]}, task="feature-extraction")
+        embedding_responses = embeddings_client.post(
+            json={"inputs": [query]}, task="feature-extraction"
+        )
         query_embedding = json.loads(embedding_responses.decode())
         D, I = self.index.search(np.array(query_embedding), k)
         results = [self.documents[i]["content"] for i in I[0]]
         return results if results else ["No relevant documents found."]
 
+
 def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
     """Chunk text into pieces of specified size with overlap, considering separators."""
-    
+
     # Split the text by the separators
     for sep in separators:
         text = text.replace(sep, "\n")
-    
+
     chunks = []
     start = 0
-    
+
     while start < len(text):
         # Determine the end of the chunk, accounting for overlap and the chunk size
         end = min(len(text), start + chunk_size)
-        
+
         # Find a natural break point at the newline to avoid cutting words
         if end < len(text):
-            while end > start and text[end] != '\n':
+            while end > start and text[end] != "\n":
                 end -= 1
-        
+
         chunk = text[start:end].strip()  # Strip trailing whitespace
         chunks.append(chunk)
-        
+
         # Move the start position forward by the overlap size
         start += chunk_size - overlap_size
-    
+
     return chunks
-    
+
+
 def load_and_chunk_pdf(file_path):
     """Extracts text from a PDF file and stores it in the property documents by chunks."""
-    
+
     with pymupdf.open(file_path) as pdf:
         text = ""
         for page in pdf:
@@ -364,11 +391,13 @@ def load_and_chunk_pdf(file_path):
         documents = []
         for chunk in chunks:
             documents.append({"content": chunk, "metadata": pdf.metadata})
-        
+
         return documents
 
-def load_pdf(file_path: str) -> None:
+
+def load_pdf(file_path):
     """Extracts text from a PDF file and stores it in the property documents by page."""
+
     doc = pymupdf.open(file_path)
     documents = []
     for page_num in range(len(doc)):
@@ -377,12 +406,15 @@ def load_pdf(file_path: str) -> None:
         documents.append({"page": page_num + 1, "content": text})
     print("PDF processed successfully!")
     return documents
-        
+
+
 def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
+    """Parse file and prepare RAG."""
+
     if not file_names:
         raise gr.Error("No file selected")
     progress(0, desc="Starting")
-    # Create connection to kadi    
+    # Create connection to kadi
     manager = KadiManager(instance=instance, host=host, pat=token)
     record = manager.record(identifier=record_id)
     progress(0.2, desc="Loading files...")
@@ -409,8 +441,12 @@ def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
     progress(1, desc="ready to chat")
     return "ready to chat", user_rag
 
+
 def preprocess_response(response: str) -> str:
     """Preprocesses the response to make it more polished."""
+
+    # Placeholder for preprocessing
+
     # response = response.strip()
     # response = response.replace("\n\n", "\n")
     # response = response.replace(" ,", ",")
@@ -422,12 +458,15 @@ def preprocess_response(response: str) -> str:
 
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
-    
+    """Get respond from LLMs."""
+
     # message is the current input query from user
     # RAG
     retrieved_docs = user_session_rag.search_documents(message)
     context = "\n".join(retrieved_docs)
-    system_message = "You are an assistant to help user to answer question related to Kadi based on Relevant documents.\nRelevant documents: {}".format(context)
+    system_message = "You are an assistant to help user to answer question related to Kadi based on Relevant documents.\nRelevant documents: {}".format(
+        context
+    )
     messages = [{"role": "assistant", "content": system_message}]
 
     # Add history for conversational chat, TODO
@@ -439,13 +478,21 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
 
     messages.append({"role": "user", "content": f"\nQuestion: {message}"})
 
-    print("-----------------")
-    print(messages)
-    print("-----------------")
+    # print("-----------------")
+    # print(messages)
+    # print("-----------------")
     # Get anwser from LLM
-    response = client.chat_completion(messages, max_tokens=2048, temperature=0.0)  #, top_p=0.9)
-    response_content = "".join([choice.message['content'] for choice in response.choices if 'content' in choice.message])
-    
+    response = client.chat_completion(
+        messages, max_tokens=2048, temperature=0.0
+    )  # , top_p=0.9)
+    response_content = "".join(
+        [
+            choice.message["content"]
+            for choice in response.choices
+            if "content" in choice.message
+        ]
+    )
+
     # Process response
     polished_response = preprocess_response(response_content)
 
@@ -462,10 +509,9 @@ with gr.Blocks() as main_demo:
     # State for storing user token
     _state_user_token = gr.State([])
 
-    user_session_rag = gr.State(
-        "placeholder"#, time_to_live=3600
-    )  # clean state after 1h
-    
+    # State for user rag
+    user_session_rag = gr.State("placeholder")
+
     with gr.Row():
         with gr.Column(scale=7):
             m = gr.Markdown("Welcome to Chatbot!")
@@ -496,7 +542,9 @@ with gr.Blocks() as main_demo:
 
                 parse_files = gr.Button("Parse files")
                 # message_box = gr.Markdown("")
-                message_box =  gr.Textbox(label="", value="progress bar", interactive=False)
+                message_box = gr.Textbox(
+                    label="", value="progress bar", interactive=False
+                )
                 # Interactions
                 # Update file list after selecting record
                 record_list.select(
@@ -505,13 +553,15 @@ with gr.Blocks() as main_demo:
                     outputs=record_file_dropdown,
                 )
                 # Prepare files for chatbot
-                parse_files.click(fn=prepare_file_for_chat, inputs=[record_list, record_file_dropdown, _state_user_token], outputs=[message_box, user_session_rag])
+                parse_files.click(
+                    fn=prepare_file_for_chat,
+                    inputs=[record_list, record_file_dropdown, _state_user_token],
+                    outputs=[message_box, user_session_rag],
+                )
 
         with gr.Row():
             txt_input = gr.Textbox(
-                show_label=False,
-                placeholder="Type your question here...",
-                lines=1
+                show_label=False, placeholder="Type your question here...", lines=1
             )
             submit_btn = gr.Button("Submit", scale=1)
             refresh_btn = gr.Button("Refresh Chat", scale=1, variant="secondary")
@@ -523,20 +573,21 @@ with gr.Blocks() as main_demo:
 
         gr.Examples(examples=example_questions, inputs=[txt_input])
 
-        txt_input.submit(fn=respond, inputs=[txt_input, chatbot, user_session_rag], outputs=[chatbot, txt_input])
-        submit_btn.click(fn=respond, inputs=[txt_input, chatbot, user_session_rag], outputs=[chatbot, txt_input])
+        # Actions
+        txt_input.submit(
+            fn=respond,
+            inputs=[txt_input, chatbot, user_session_rag],
+            outputs=[chatbot, txt_input],
+        )
+        submit_btn.click(
+            fn=respond,
+            inputs=[txt_input, chatbot, user_session_rag],
+            outputs=[chatbot, txt_input],
+        )
         refresh_btn.click(lambda: [], None, chatbot)
 
 app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
 
 
-# def launch_gradio():
-#    login_demo.launch(server_port=7860, host="0.0.0.0", share=True)
-
-
-import threading
-
 if __name__ == "__main__":
-    # Launch Gradio with share=True in a separate thread
-    # threading.Thread(target=launch_gradio).start()
     uvicorn.run(app, port=7860, host="0.0.0.0")

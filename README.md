@@ -11,3 +11,5 @@ pinned: false
 ---
 
 Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+
+A simple RAG-chatbot which is linked to Kadi-demo instance using OAuth2 in Kadi.
