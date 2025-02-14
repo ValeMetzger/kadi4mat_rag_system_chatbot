@@ -42,6 +42,7 @@ load_dotenv()
 KADI_CLIENT_ID = os.environ["KADI_CLIENT_ID"]
 KADI_CLIENT_SECRET = os.environ["KADI_CLIENT_SECRET"]
 SECRET_KEY = os.environ["SECRET_KEY"]
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 huggingfacehub_api_token = os.environ["huggingfacehub_api_token"]
 
 from huggingface_hub import login
@@ -73,8 +74,9 @@ oauth.register(
 
 # Global LLM client
 from huggingface_hub import InferenceClient
+from langchain_groq import ChatGroq
 
-client = InferenceClient("meta-llama/Meta-Llama-3-8B-Instruct")
+client = ChatGroq(model="llama-3.1-70b-versatile", temperature=0, api_key=GROQ_API_KEY)
 
 # Mixed-usage of huggingface client and local model for showing 2 possibilities
 embeddings_client = InferenceClient(
