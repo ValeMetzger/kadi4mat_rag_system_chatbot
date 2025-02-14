@@ -270,12 +270,7 @@ def get_all_records(user_token):
         parsed = json.loads(response.content)
         all_records_identifiers.extend(get_page_records(parsed))
 
-    return gr.Dropdown(
-        choices=all_records_identifiers,
-        interactive=True,
-        label="Record Identifier",
-        info="Select record to get file list",
-    )
+    return all_records_identifiers
 
 
 def _init_user_token(request: gr.Request):
