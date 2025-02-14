@@ -36,6 +36,11 @@ from requests.compat import urljoin
 from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
+import mimetypes
+from pathlib import Path
+from PyPDF2 import PdfReader
+from docx import Document as DocxReader
+import pandas as pd
 
 # Kadi OAuth settings
 load_dotenv()
@@ -152,7 +157,7 @@ async def auth(request: Request):
 
         # Automatically process all records and files after login
         user_token = access_token["access_token"]
-        await process_all_records_and_files(user_token)
+        await process_all_records_and_files(user_token, progress=gr.Progress())
 
     except OAuthError as e:
         print("Error getting access token", e)
@@ -160,13 +165,88 @@ async def auth(request: Request):
 
     return RedirectResponse(url="/gradio")
 
-async def process_all_records_and_files(user_token):
+
+def load_pdf(file_path):
+    """Extract text from a PDF file."""
+    reader = PdfReader(file_path)
+    text = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
+    return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "pdf"}}
+
+def load_docx(file_path):
+    """Extract text from a DOCX file."""
+    doc = DocxReader(file_path)
+    text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+    return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "docx"}}
+
+def load_excel(file_path):
+    """Extract text from an Excel file."""
+    df = pd.read_excel(file_path)
+    text = df.to_string(index=False)
+    return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "excel"}}
+
+def load_text(file_path):
+    """Read plain text from a TXT file."""
+    with open(file_path, 'r', encoding='utf-8') as f:
+        text = f.read()
+    return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "txt"}}
+
+def load_markdown(file_path):
+    """Convert Markdown content to plain text."""
+    with open(file_path, 'r', encoding='utf-8') as f:
+        text = f.read()
+    return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "md"}}
+
+def load_csv(file_path):
+    """Extract text from a CSV file."""
+    df = pd.read_csv(file_path)
+    text = df.to_string(index=False)
+    return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "csv"}}
+
+def load_file(file_path):
+    """Unified loader for different file types."""
+    file_type = detect_file_type(file_path)
+    if file_type == "pdf":
+        return load_pdf(file_path)
+    elif file_type == "docx":
+        return load_docx(file_path)
+    elif file_type == "excel":
+        return load_excel(file_path)
+    elif file_type == "txt":
+        return load_text(file_path)
+    elif file_type == "md":
+        return load_markdown(file_path)
+    elif file_type == "csv":
+        return load_csv(file_path)
+    else:
+        raise ValueError(f"Unsupported file type: {file_path}")
+
+def detect_file_type(file_path):
+    """Detect file type using mimetypes and file extension."""
+    mime_type, _ = mimetypes.guess_type(file_path)
+    ext = Path(file_path).suffix.lower()
+    if mime_type == "application/pdf" or ext == ".pdf":
+        return "pdf"
+    elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or ext == ".docx":
+        return "docx"
+    elif mime_type in ["application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] or ext in [".xls", ".xlsx"]:
+        return "excel"
+    elif mime_type == "text/plain" or ext == ".txt":
+        return "txt"
+    elif mime_type == "text/markdown" or ext == ".md":
+        return "md"
+    elif mime_type == "text/csv" or ext == ".csv":
+        return "csv"
+    else:
+        raise ValueError(f"Unsupported file type: {file_path}")
+
+async def process_all_records_and_files(user_token, progress=gr.Progress()):
     """Process all records and files for the user."""
     manager = KadiManager(instance=instance, host=host, pat=user_token)
     all_records = get_all_records(user_token)
 
     documents = []
-    for record_id in all_records:
+    total_records = len(all_records)
+    for i, record_id in enumerate(all_records):
         record = manager.record(identifier=record_id)
         file_names = [info["name"] for info in record.get_filelist().json()["items"]]
         for file_name in file_names:
@@ -174,8 +254,13 @@ async def process_all_records_and_files(user_token):
             with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
                 temp_file_location = os.path.join(temp_dir, file_name)
                 record.download_file(file_id, temp_file_location)
-                docs = load_and_chunk_pdf(temp_file_location)
-                documents.extend(docs)
+                try:
+                    doc = load_file(temp_file_location)
+                    documents.append(doc)
+                except ValueError as e:
+                    print(f"Skipping unsupported file type: {file_name}")
+
+        progress((i + 1) / total_records, desc=f"Processing record {i + 1}/{total_records}")
 
     user_rag = SimpleRAG()
     user_rag.documents = documents
@@ -183,7 +268,6 @@ async def process_all_records_and_files(user_token):
     user_rag.build_vector_db()
     global user_session_rag
     user_session_rag = user_rag
-
 
 def greet(request: gr.Request):
     """Show greeting message."""
