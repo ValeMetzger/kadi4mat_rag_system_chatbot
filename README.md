@@ -1,6 +1,6 @@
 ---
 title: Kadi4mat Rag System
-emoji: 💻
+emoji: 🆒
 colorFrom: yellow
 colorTo: green
 sdk: gradio
