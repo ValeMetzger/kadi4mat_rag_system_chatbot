@@ -1,8 +1,8 @@
 ---
-title: KadiChat
-emoji: 💬
-colorFrom: blue
-colorTo: purple
+title: Kadi4mat Rag System
+emoji: 💻
+colorFrom: yellow
+colorTo: green
 sdk: gradio
 sdk_version: 4.44.1
 python_version: 3.10.4
