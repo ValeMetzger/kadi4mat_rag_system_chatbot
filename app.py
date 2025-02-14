@@ -146,18 +146,43 @@ async def login(request: Request):
 @app.route("/auth")
 async def auth(request: Request):
     root_url = gr.route_utils.get_root_url(request, "/auth", None)
-    # print("*****+ in auth")
-    # print("root_urlt", root_url)
-    # print("request", request)
     try:
         access_token = await oauth.kadi4mat.authorize_access_token(request)
         request.session["user_access_token"] = access_token["access_token"]
+
+        # Automatically process all records and files after login
+        user_token = access_token["access_token"]
+        await process_all_records_and_files(user_token)
 
     except OAuthError as e:
         print("Error getting access token", e)
         return RedirectResponse(url="/")
 
     return RedirectResponse(url="/gradio")
+
+async def process_all_records_and_files(user_token):
+    """Process all records and files for the user."""
+    manager = KadiManager(instance=instance, host=host, pat=user_token)
+    all_records = get_all_records(user_token)
+
+    documents = []
+    for record_id in all_records:
+        record = manager.record(identifier=record_id)
+        file_names = [info["name"] for info in record.get_filelist().json()["items"]]
+        for file_name in file_names:
+            file_id = record.get_file_id(file_name)
+            with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+                temp_file_location = os.path.join(temp_dir, file_name)
+                record.download_file(file_id, temp_file_location)
+                docs = load_and_chunk_pdf(temp_file_location)
+                documents.extend(docs)
+
+    user_rag = SimpleRAG()
+    user_rag.documents = documents
+    user_rag.embeddings_model = embeddings_model
+    user_rag.build_vector_db()
+    global user_session_rag
+    user_session_rag = user_rag
 
 
 def greet(request: gr.Request):
@@ -526,41 +551,6 @@ with gr.Blocks() as main_demo:
             with gr.Column(scale=7):
                 chatbot = gr.Chatbot()
 
-            with gr.Column(scale=3):
-                record_list = gr.Dropdown(label="Record Identifier")
-                record_file_dropdown = gr.Dropdown(
-                    choices=[""],
-                    label="Select file",
-                    info="Select (max. 3) files to chat with.",
-                    multiselect=True,
-                    max_choices=3,
-                )
-
-                gr.Markdown("  " * 200)
-                # Use .then to ensure get token first
-                main_demo.load(_init_user_token, None, _state_user_token).then(
-                    get_all_records, _state_user_token, record_list
-                )
-
-                parse_files = gr.Button("Parse files")
-                # message_box = gr.Markdown("")
-                message_box = gr.Textbox(
-                    label="", value="progress bar", interactive=False
-                )
-                # Interactions
-                # Update file list after selecting record
-                record_list.select(
-                    fn=get_files_in_record,
-                    inputs=[record_list, _state_user_token],
-                    outputs=record_file_dropdown,
-                )
-                # Prepare files for chatbot
-                parse_files.click(
-                    fn=prepare_file_for_chat,
-                    inputs=[record_list, record_file_dropdown, _state_user_token],
-                    outputs=[message_box, user_session_rag],
-                )
-
         with gr.Row():
             txt_input = gr.Textbox(
                 show_label=False, placeholder="Type your question here...", lines=1
@@ -589,7 +579,6 @@ with gr.Blocks() as main_demo:
         refresh_btn.click(lambda: [], None, chatbot)
 
 app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
-
 
 if __name__ == "__main__":
     uvicorn.run(app, port=7860, host="0.0.0.0")
