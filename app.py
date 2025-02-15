@@ -41,6 +41,7 @@ from pathlib import Path
 from PyPDF2 import PdfReader
 from docx import Document as DocxReader
 import pandas as pd
+from chromadb import Chroma
 
 # Kadi OAuth settings
 load_dotenv()
@@ -155,15 +156,12 @@ async def auth(request: Request):
         access_token = await oauth.kadi4mat.authorize_access_token(request)
         request.session["user_access_token"] = access_token["access_token"]
 
-        # Automatically process all records and files after login
-        user_token = access_token["access_token"]
-        await process_all_records_and_files(user_token, progress=gr.Progress())
+        # Redirect to Gradio app immediately after authorization
+        return RedirectResponse(url="/gradio")
 
     except OAuthError as e:
         print("Error getting access token", e)
         return RedirectResponse(url="/")
-
-    return RedirectResponse(url="/gradio")
 
 
 def load_pdf(file_path):
@@ -422,25 +420,24 @@ class SimpleRAG:
             page = doc[page_num]
             text = page.get_text()
             self.documents.append({"page": page_num + 1, "content": text})
-        # print("PDF processed successfully!")
+        print("PDF processed successfully!")
 
     def build_vector_db(self) -> None:
-        """Builds a vector database using the content of the PDF."""
+        """Builds a vector database using the content of the documents."""
         if self.embeddings_model is None:
             self.embeddings_model = SentenceTransformer(
                 "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
-            )  # jinaai/jina-embeddings-v2-base-de?
+            )
 
-        # Use local model
-        # print("now doing embedding")
-        # print("len of documents", len(self.documents))
-        # embedding_responses = embeddings_client.post(json={"inputs":[doc["content"] for doc in self.documents]}, task="feature-extraction")
-        # self.embeddings = np.array(json.loads(embedding_responses.decode()))
-        self.embeddings = self.embeddings_model.encode(
-            [doc["content"] for doc in self.documents], show_progress_bar=True
-        )
-        self.index = faiss.IndexFlatL2(self.embeddings.shape[1])
-        self.index.add(np.array(self.embeddings))
+        # Ensure self.documents is a list of dictionaries with "content" key
+        valid_documents = [doc for doc in self.documents if isinstance(doc, dict) and "content" in doc]
+        if len(valid_documents) != len(self.documents):
+            print("Warning: Some documents are missing the 'content' key or are not dictionaries.")
+
+        texts = [doc["content"] for doc in valid_documents]
+        embeddings = self.embeddings_model.encode(texts, show_progress_bar=True)
+        self.vector_db = Chroma()
+        self.vector_db.add_documents(texts, embeddings)
         print("Vector database built successfully!")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
@@ -502,16 +499,10 @@ def load_and_chunk_pdf(file_path):
 
 
 def load_pdf(file_path):
-    """Extracts text from a PDF file and stores it in the property documents by page."""
-
-    doc = pymupdf.open(file_path)
-    documents = []
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        text = page.get_text()
-        documents.append({"page": page_num + 1, "content": text})
-    print("PDF processed successfully!")
-    return documents
+    """Extract text from a PDF file."""
+    reader = PdfReader(file_path)
+    text = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
+    return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "pdf"}}
 
 
 def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):

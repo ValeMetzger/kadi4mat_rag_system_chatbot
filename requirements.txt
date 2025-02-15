@@ -18,3 +18,4 @@ langchain-community
 huggingface_hub
 PyYAML
 pymupdf
+chromadb
