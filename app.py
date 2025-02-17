@@ -409,15 +409,24 @@ class SimpleRAG:
         self.index = None
         self.collection = None
 
-    def load_pdf(self, file_path: str) -> None:
-        """Extracts text from a PDF file and stores it in the property documents by page."""
-        doc = pymupdf.open(file_path)
-        self.documents = []
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            text = page.get_text()
-            self.documents.append({"page": page_num + 1, "content": text})
-        print("PDF processed successfully!")
+    def load_file(self, file_path: str) -> None:
+        """Loads a file and stores its content in the property documents."""
+        file_type = detect_file_type(file_path)
+        if file_type == "pdf":
+            self.documents = load_and_chunk_pdf(file_path)
+        elif file_type == "docx":
+            self.documents = [load_docx(file_path)]
+        elif file_type == "excel":
+            self.documents = [load_excel(file_path)]
+        elif file_type == "txt":
+            self.documents = [load_text(file_path)]
+        elif file_type == "md":
+            self.documents = [load_markdown(file_path)]
+        elif file_type == "csv":
+            self.documents = [load_csv(file_path)]
+        else:
+            raise ValueError(f"Unsupported file type: {file_path}")
+        print(f"{file_type.upper()} file processed successfully!")
 
     def build_vector_db(self) -> None:
         """Builds a vector database using the content of the documents."""
@@ -445,14 +454,14 @@ class SimpleRAG:
         print("Vector database built successfully!")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
-        """Searches for relevant documents using vector similarity."""
-        if self.collection is None:
-            raise ValueError("The vector database has not been built yet.")
-        
-        # Use embeddings_client
-        query_embedding = embeddings_client.feature_extraction([query])[0]
-        results = self.collection.query(embedding=query_embedding, top_k=k)
-        return [result["document"] for result in results] if results else ["No relevant documents found."]
+            """Searches for relevant documents using vector similarity."""
+            if self.collection is None:
+                raise ValueError("The vector database has not been built yet.")
+            
+            # Use embeddings_client
+            query_embedding = embeddings_client.feature_extraction([query])[0]
+            results = self.collection.query(embedding=query_embedding, top_k=k)
+            return [result["document"] for result in results] if results else ["No relevant documents found."]
 
 
 
@@ -528,11 +537,11 @@ def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
             temp_file_location = os.path.join(temp_dir, file_name)
             record.download_file(file_id, temp_file_location)
             # parse document
-            docs = load_and_chunk_pdf(temp_file_location)
-            documents.extend(docs)
+            user_rag = SimpleRAG()
+            user_rag.load_file(temp_file_location)
+            documents.extend(user_rag.documents)
 
     progress(0.4, desc="Embedding documents...")
-    user_rag = SimpleRAG()
     user_rag.documents = documents
     user_rag.embeddings_model = embeddings_model
     user_rag.build_vector_db()
