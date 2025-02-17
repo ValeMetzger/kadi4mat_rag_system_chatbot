@@ -607,7 +607,7 @@ with gr.Blocks() as main_demo:
     _state_user_token = gr.State([])
 
     # State for user rag
-    user_session_rag = gr.State("placeholder")
+    user_session_rag = gr.State(SimpleRAG())  # Initialize as SimpleRAG instance
 
     with gr.Row():
         with gr.Column(scale=7):
