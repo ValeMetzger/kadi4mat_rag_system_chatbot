@@ -408,12 +408,9 @@ class SimpleRAG:
         self.embeddings_model = None
         self.embeddings = None
         self.index = None
-        # self.load_pdf("Brandt et al_2024_Kadi_info_page.pdf")
-        # self.build_vector_db()
 
     def load_pdf(self, file_path: str) -> None:
         """Extracts text from a PDF file and stores it in the property documents by page."""
-
         doc = pymupdf.open(file_path)
         self.documents = []
         for page_num in range(len(doc)):
@@ -436,15 +433,15 @@ class SimpleRAG:
 
         texts = [doc["content"] for doc in valid_documents]
         embeddings = self.embeddings_model.encode(texts, show_progress_bar=True)
-        self.vector_db = chromadb.Client()
-        self.vector_db.add_documents(texts, embeddings)
+        
+        # Initialize the FAISS index
+        self.index = faiss.IndexFlatL2(embeddings.shape[1])
+        self.index.add(embeddings)
         print("Vector database built successfully!")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
-
         # Use embeddings_client
-        # query_embedding = self.embeddings_model.encode([query], show_progress_bar=False)
         embedding_responses = embeddings_client.post(
             json={"inputs": [query]}, task="feature-extraction"
         )
@@ -452,6 +449,7 @@ class SimpleRAG:
         D, I = self.index.search(np.array(query_embedding), k)
         results = [self.documents[i]["content"] for i in I[0]]
         return results if results else ["No relevant documents found."]
+
 
 
 def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
