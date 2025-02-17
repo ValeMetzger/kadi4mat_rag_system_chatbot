@@ -556,6 +556,10 @@ def preprocess_response(response: str) -> str:
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     """Get respond from LLMs."""
 
+    # Ensure the vector database is built
+    if user_session_rag.collection is None:
+        user_session_rag.build_vector_db()
+
     # message is the current input query from user
     # RAG
     retrieved_docs = user_session_rag.search_documents(message)
