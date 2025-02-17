@@ -41,7 +41,7 @@ from pathlib import Path
 from PyPDF2 import PdfReader
 from docx import Document as DocxReader
 import pandas as pd
-from chromadb import ChromaClient
+import chromadb
 
 # Kadi OAuth settings
 load_dotenv()
@@ -436,7 +436,7 @@ class SimpleRAG:
 
         texts = [doc["content"] for doc in valid_documents]
         embeddings = self.embeddings_model.encode(texts, show_progress_bar=True)
-        self.vector_db = ChromaClient()
+        self.vector_db = chromadb.Client()
         self.vector_db.add_documents(texts, embeddings)
         print("Vector database built successfully!")
 
