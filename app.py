@@ -244,28 +244,43 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
 
     documents = []
     total_records = len(all_records)
+    progress(0, desc=f"Found {total_records} records to process")
+
     for i, record_id in enumerate(all_records):
-        record = manager.record(identifier=record_id)
-        file_names = [info["name"] for info in record.get_filelist().json()["items"]]
-        for file_name in file_names:
-            file_id = record.get_file_id(file_name)
-            with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-                temp_file_location = os.path.join(temp_dir, file_name)
-                record.download_file(file_id, temp_file_location)
+        try:
+            record = manager.record(identifier=record_id)
+            file_names = [info["name"] for info in record.get_filelist().json()["items"]]
+            
+            for file_name in file_names:
                 try:
-                    doc = load_file(temp_file_location)
-                    documents.append(doc)
-                except ValueError as e:
-                    print(f"Skipping unsupported file type: {file_name}")
+                    file_id = record.get_file_id(file_name)
+                    with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+                        temp_file_location = os.path.join(temp_dir, file_name)
+                        record.download_file(file_id, temp_file_location)
+                        doc = load_file(temp_file_location)
+                        # Add record metadata to the document
+                        doc["metadata"]["record_id"] = record_id
+                        documents.append(doc)
+                except Exception as e:
+                    print(f"Error processing file {file_name} in record {record_id}: {str(e)}")
 
-        progress((i + 1) / total_records, desc=f"Processing record {i + 1}/{total_records}")
+            progress((i + 1) / total_records, desc=f"Processing record {i + 1}/{total_records}")
+        except Exception as e:
+            print(f"Error processing record {record_id}: {str(e)}")
+            continue
 
-    user_rag = SimpleRAG()
-    user_rag.documents = documents
-    user_rag.embeddings_model = embeddings_model
-    user_rag.build_vector_db()
+    # Initialize RAG system with all documents
+    rag = SimpleRAG()
+    rag.documents = documents
+    rag.embeddings_model = embeddings_model
+    print(f"Building vector database with {len(documents)} documents...")
+    rag.build_vector_db()
+    
+    # Update the global RAG system
     global user_session_rag
-    user_session_rag = user_rag
+    user_session_rag = rag
+    
+    return len(documents)
 
 def greet(request: gr.Request):
     """Show greeting message."""
@@ -411,91 +426,131 @@ class SimpleRAG:
         self.is_initialized = False  # Add a flag to track initialization
 
     def build_vector_db(self) -> None:
-        """Builds a vector database using the content of the documents."""
-        if self.embeddings_model is None:
-            self.embeddings_model = SentenceTransformer(
-                "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
-            )
-
-        # Use persistent client instead of in-memory
-        self.index = chromadb.PersistentClient(path="./chroma_db")
+        """
+        Builds a vector database using the content of the documents.
+        Includes error handling, logging, and document validation.
+        """
+        print("\n=== Starting Vector Database Build Process ===")
         
-        # Use a unique collection name or delete existing one
-        collection_name = "documents"
-        try:
-            self.index.delete_collection(collection_name)
-        except:
-            pass
-        self.collection = self.index.create_collection(name=collection_name)
-
-        if not self.documents:
-            print("Warning: No documents available to build the vector database.")
-            return
-            
-        if self.is_initialized:
-            print("Vector database already initialized")
-            return
-        
+        # Validate embeddings model
         if self.embeddings_model is None:
-            self.embeddings_model = SentenceTransformer(
-                "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
-            )
+            print("Initializing embeddings model...")
+            try:
+                self.embeddings_model = SentenceTransformer(
+                    "sentence-transformers/all-mpnet-base-v2",
+                    trust_remote_code=True
+                )
+            except Exception as e:
+                raise ValueError(f"Failed to initialize embeddings model: {str(e)}")
 
-        # Check if documents exist
+        # Validate documents
         if not self.documents:
             raise ValueError("No documents available to build the vector database.")
+        
+        print(f"Processing {len(self.documents)} documents...")
 
-        # Ensure self.documents is a list of dictionaries with "content" key
-        valid_documents = [doc for doc in self.documents if isinstance(doc, dict) and "content" in doc]
+        # Validate document structure and content
+        valid_documents = []
+        for i, doc in enumerate(self.documents):
+            try:
+                if not isinstance(doc, dict):
+                    print(f"Skipping document {i}: Not a dictionary")
+                    continue
+                if "content" not in doc:
+                    print(f"Skipping document {i}: No content field")
+                    continue
+                if not doc["content"] or not isinstance(doc["content"], str):
+                    print(f"Skipping document {i}: Invalid content")
+                    continue
+                if len(doc["content"].strip()) == 0:
+                    print(f"Skipping document {i}: Empty content")
+                    continue
+                valid_documents.append(doc)
+            except Exception as e:
+                print(f"Error processing document {i}: {str(e)}")
+                continue
+
         if not valid_documents:
-            raise ValueError("No valid documents found. Documents must be dictionaries with a 'content' key.")
-        
-        print(f"Processing {len(valid_documents)} valid documents...")
+            raise ValueError("No valid documents found after validation")
 
-        # Extract text content
-        texts = [doc["content"] for doc in valid_documents]
-        
-        # Validate texts
-        texts = [text for text in texts if text and isinstance(text, str) and len(text.strip()) > 0]
-        if not texts:
-            raise ValueError("No valid text content found in documents.")
-        
-        print(f"Generating embeddings for {len(texts)} text segments...")
-        
-        # Generate embeddings
-        try:
-            embeddings = self.embeddings_model.encode(texts, show_progress_bar=True)
-            if len(embeddings) == 0:
-                raise ValueError("Embedding generation failed - no embeddings produced")
-            print(f"Generated {len(embeddings)} embeddings successfully")
-        except Exception as e:
-            raise ValueError(f"Failed to generate embeddings: {str(e)}")
+        print(f"Found {len(valid_documents)} valid documents")
 
-        # Initialize ChromaDB
         try:
-            self.index = chromadb.Client()
-            # Use a unique collection name or delete existing one
+            # Initialize ChromaDB with persistent storage
+            print("Initializing ChromaDB...")
+            persist_directory = "./chroma_db"
+            os.makedirs(persist_directory, exist_ok=True)
+            
+            self.index = chromadb.PersistentClient(path=persist_directory)
             collection_name = "documents"
+
+            # Clean up existing collection if it exists
             try:
                 self.index.delete_collection(collection_name)
-            except:
-                pass
-            self.collection = self.index.create_collection(name=collection_name)
+                print("Deleted existing collection")
+            except Exception as e:
+                print(f"No existing collection to delete: {str(e)}")
+
+            # Create new collection
+            self.collection = self.index.create_collection(
+                name=collection_name,
+                metadata={"description": "Document collection for RAG system"}
+            )
+            print("Created new collection")
+
+            # Prepare documents and metadata
+            texts = []
+            metadatas = []
+            ids = []
             
-            # Generate unique IDs
-            ids = [str(i) for i in range(len(texts))]
-            
-            # Add to collection
+            for idx, doc in enumerate(valid_documents):
+                texts.append(doc["content"])
+                metadata = doc.get("metadata", {})
+                if not isinstance(metadata, dict):
+                    metadata = {"original_metadata": str(metadata)}
+                metadata["doc_id"] = str(idx)
+                metadata["source"] = doc.get("source", "unknown")
+                metadatas.append(metadata)
+                ids.append(f"doc_{idx}")
+
+            # Generate embeddings
+            print("Generating embeddings...")
+            try:
+                embeddings = self.embeddings_model.encode(
+                    texts,
+                    show_progress_bar=True,
+                    batch_size=32,
+                    normalize_embeddings=True
+                )
+                print(f"Generated {len(embeddings)} embeddings")
+            except Exception as e:
+                raise ValueError(f"Failed to generate embeddings: {str(e)}")
+
+            # Validate embeddings
+            if len(embeddings) != len(texts):
+                raise ValueError(f"Embedding count ({len(embeddings)}) doesn't match document count ({len(texts)})")
+
+            # Add documents to collection
+            print("Adding documents to collection...")
             self.collection.add(
-                embeddings=embeddings.tolist(),  # Convert numpy array to list
+                embeddings=embeddings.tolist(),
                 documents=texts,
+                metadatas=metadatas,
                 ids=ids
             )
-            print("Vector database built successfully!")
-        except Exception as e:
-            raise ValueError(f"Failed to build vector database: {str(e)}")
 
-        self.is_initialized = True
+            # Verify collection size
+            collection_size = self.collection.count()
+            if collection_size != len(valid_documents):
+                print(f"Warning: Collection size ({collection_size}) differs from input document count ({len(valid_documents)})")
+            
+            print(f"Successfully built vector database with {collection_size} documents")
+            print("=== Vector Database Build Process Complete ===\n")
+
+        except Exception as e:
+            error_msg = f"Failed to build vector database: {str(e)}"
+            print(f"ERROR: {error_msg}")
+            raise ValueError(error_msg)
 
     def load_file(self, file_path: str) -> None:
         """Loads a file and stores its content in the property documents."""
@@ -646,63 +701,55 @@ def preprocess_response(response: str) -> str:
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     """Get respond from LLMs."""
-    if not user_session_rag or not user_session_rag.documents:
+    
+    if not user_session_rag or not hasattr(user_session_rag, 'documents') or not user_session_rag.documents:
         return (
             history + [
                 (
                     message,
-                    "Please load some documents first before asking questions.",
+                    "Still loading documents or no documents found. Please wait a moment and try again.",
                 )
             ],
             "",
         )
 
-    # Ensure the vector database is built
-    if not user_session_rag.is_initialized:
-        user_session_rag.build_vector_db()
-
-    # Ensure the vector database is built
-    if user_session_rag.collection is None:
-        user_session_rag.build_vector_db()
-
-    # message is the current input query from user
-    # RAG
-    retrieved_docs = user_session_rag.search_documents(message)
-    context = "\n".join(retrieved_docs)
-    system_message = "You are an assistant to help user to answer question related to Kadi based on Relevant documents.\nRelevant documents: {}".format(
-        context
-    )
-    messages = [{"role": "assistant", "content": system_message}]
-
-    # Add history for conversational chat, TODO
-    # for val in history:
-    #     #if val[0]:
-    #     messages.append({"role": "user", "content": val[0]})
-    #     #if val[1]:
-    #     messages.append({"role": "assistant", "content": val[1]}]
-
-    messages.append({"role": "user", "content": f"\nQuestion: {message}"})
-
-    # print("-----------------")
-    # print(messages)
-    # print("-----------------")
-    # Get anwser from LLM
-    response = client.chat_completion(
-        messages, max_tokens=2048, temperature=0.0
-    )  # , top_p=0.9)
-    response_content = "".join(
-        [
-            choice.message["content"]
-            for choice in response.choices
-            if "content" in choice.message
+    try:
+        # Get relevant documents
+        retrieved_docs = user_session_rag.search_documents(message)
+        context = "\n".join(retrieved_docs)
+        
+        # Prepare system message with context
+        system_message = (
+            "You are an assistant helping with Kadi documents. "
+            "Here are the relevant documents to answer the question:\n\n"
+            f"{context}"
+        )
+        
+        # Prepare messages for the LLM
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": message}
         ]
-    )
-
-    # Process response
-    polished_response = preprocess_response(response_content)
-
-    history.append((message, polished_response))
-    return history, ""
+        
+        # Get response from LLM
+        response = client.chat_completion(
+            messages,
+            max_tokens=2048,
+            temperature=0.0
+        )
+        
+        response_content = "".join(
+            [choice.message["content"] for choice in response.choices if "content" in choice.message]
+        )
+        
+        # Update history and return
+        history.append((message, response_content))
+        return history, ""
+        
+    except Exception as e:
+        error_message = f"Error processing your request: {str(e)}"
+        history.append((message, error_message))
+        return history, ""
 
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
@@ -710,51 +757,116 @@ app = gr.mount_gradio_app(app, login_demo, path="/main")
 
 # Gradio interface
 with gr.Blocks() as main_demo:
-
-    # State for storing user token
+    # State variables
     _state_user_token = gr.State([])
+    user_session_rag = gr.State(SimpleRAG())
+    loading_state = gr.State(True)  # Track loading state
 
-    # State for user rag
-    user_session_rag = gr.State(SimpleRAG())  # Initialize as SimpleRAG instance
-
+    # Header with welcome message and logout button
     with gr.Row():
         with gr.Column(scale=7):
-            m = gr.Markdown("Welcome to Chatbot!")
-            main_demo.load(greet, None, m)
+            welcome_msg = gr.Markdown("Welcome to Chatbot!")
+            main_demo.load(greet, None, welcome_msg)
         with gr.Column(scale=1):
             gr.Button("Logout", link="/logout")
 
-    with gr.Tab("Main"):
-        with gr.Row():
-            with gr.Column(scale=7):
-                chatbot = gr.Chatbot()
+    # Loading status indicator
+    loading_status = gr.Markdown("Initializing system and loading records...")
 
+    # Add a loading state to your Gradio interface
+    loading_state = gr.State(True)  # Start as True (loading)
+    status_message = gr.Markdown("Loading documents...")
+
+    # Update these when loading completes
+    loading_state.value = False
+    status_message.value = "Ready to chat!"
+
+    @gr.on(main_demo.load)
+    async def initialize_rag(request: gr.Request):
+        try:
+            user_token = request.request.session["user_access_token"]
+            num_docs = await process_all_records_and_files(user_token)
+            loading_state.value = False
+            return f"Ready to chat! Loaded {num_docs} documents from your records."
+        except Exception as e:
+            loading_state.value = False
+            return f"Error loading records: {str(e)}"
+
+    # Update loading status when initialization completes
+    main_demo.load(initialize_rag, None, loading_status)
+
+    # Main chat interface
+    with gr.Tab("Chat"):
+        with gr.Row():
+            # Chat display
+            with gr.Column(scale=7):
+                chatbot = gr.Chatbot(height=600)
+                
+            # System status (optional)
+            with gr.Column(scale=3):
+                system_status = gr.Markdown("System Status: Initializing...")
+
+        # Input area
         with gr.Row():
             txt_input = gr.Textbox(
-                show_label=False, placeholder="Type your question here...", lines=1
+                show_label=False,
+                placeholder="Type your question here...",
+                lines=2,
+                scale=8
             )
-            submit_btn = gr.Button("Submit", scale=1)
-            refresh_btn = gr.Button("Refresh Chat", scale=1, variant="secondary")
+            
+        # Buttons
+        with gr.Row():
+            submit_btn = gr.Button("Submit", scale=2)
+            refresh_btn = gr.Button("Clear Chat", scale=1, variant="secondary")
 
-        example_questions = [
-            ["Summarize the paper."],
-            ["how to create record in kadi4mat?"],
-        ]
+        # Example questions
+        gr.Examples(
+            examples=[
+                ["Summarize the contents of my records."],
+                ["What are the main topics discussed in my documents?"],
+                ["Find documents related to material science."],
+                ["How many records do I have in total?"],
+            ],
+            inputs=[txt_input]
+        )
 
-        gr.Examples(examples=example_questions, inputs=[txt_input])
+        # Define chat functionality
+        def chat_response(message, history, loading_state):
+            if loading_state:
+                return history + [(message, "Still loading documents. Please wait...")], ""
+            return respond(message, history, user_session_rag)
 
-        # Actions
+        # Button actions
         txt_input.submit(
-            fn=respond,
-            inputs=[txt_input, chatbot, user_session_rag],
-            outputs=[chatbot, txt_input],
+            fn=chat_response,
+            inputs=[txt_input, chatbot, loading_state],
+            outputs=[chatbot, txt_input]
         )
+        
         submit_btn.click(
-            fn=respond,
-            inputs=[txt_input, chatbot, user_session_rag],
-            outputs=[chatbot, txt_input],
+            fn=chat_response,
+            inputs=[txt_input, chatbot, loading_state],
+            outputs=[chatbot, txt_input]
         )
-        refresh_btn.click(lambda: [], None, chatbot)
+        
+        refresh_btn.click(
+            fn=lambda: ([], ""),
+            outputs=[chatbot, txt_input]
+        )
+
+        # Update system status periodically
+        def update_status(loading_state):
+            if loading_state:
+                return "System Status: Loading documents..."
+            return "System Status: Ready"
+
+        main_demo.load(
+            fn=update_status,
+            inputs=[loading_state],
+            outputs=[system_status],
+            every=1
+        )
 
 app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
 
