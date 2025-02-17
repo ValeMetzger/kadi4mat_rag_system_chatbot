@@ -407,6 +407,7 @@ class SimpleRAG:
         self.documents = []
         self.embeddings_model = None
         self.index = None
+        self.collection = None
 
     def load_pdf(self, file_path: str) -> None:
         """Extracts text from a PDF file and stores it in the property documents by page."""
@@ -433,17 +434,21 @@ class SimpleRAG:
         texts = [doc["content"] for doc in valid_documents]
         embeddings = self.embeddings_model.encode(texts, show_progress_bar=True)
         
-        # Initialize the ChromaDB index
+        # Initialize the ChromaDB client and collection
         self.index = chromadb.Client()
-        self.index.add_documents(embeddings, texts)
+        self.collection = self.index.create_collection(name="documents")
+        self.collection.add(embeddings=embeddings, documents=texts)
         print("Vector database built successfully!")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
+        if self.collection is None:
+            raise ValueError("The vector database has not been built yet.")
+        
         # Use embeddings_client
         query_embedding = embeddings_client.feature_extraction([query])[0]
-        results = self.index.query(query_embedding, top_k=k)
-        return results if results else ["No relevant documents found."]
+        results = self.collection.query(embedding=query_embedding, top_k=k)
+        return [result["document"] for result in results] if results else ["No relevant documents found."]
 
 
 
