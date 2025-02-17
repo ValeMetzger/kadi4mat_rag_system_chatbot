@@ -406,7 +406,6 @@ class SimpleRAG:
     def __init__(self) -> None:
         self.documents = []
         self.embeddings_model = None
-        self.embeddings = None
         self.index = None
 
     def load_pdf(self, file_path: str) -> None:
@@ -434,21 +433,21 @@ class SimpleRAG:
         texts = [doc["content"] for doc in valid_documents]
         embeddings = self.embeddings_model.encode(texts, show_progress_bar=True)
         
-        # Initialize the FAISS index
-        self.index = faiss.IndexFlatL2(embeddings.shape[1])
-        self.index.add(embeddings)
+        # Initialize the ChromaDB index
+        self.index = chromadb.Client()
+        self.index.add_documents(embeddings, texts)
         print("Vector database built successfully!")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
         # Use embeddings_client
-        embedding_responses = embeddings_client.post(
-            json={"inputs": [query]}, task="feature-extraction"
+        embedding_responses = embeddings_client.feature_extraction(
+            inputs=[query]
         )
-        query_embedding = json.loads(embedding_responses.decode())
-        D, I = self.index.search(np.array(query_embedding), k)
-        results = [self.documents[i]["content"] for i in I[0]]
+        query_embedding = embedding_responses[0]
+        results = self.index.query(query_embedding, top_k=k)
         return results if results else ["No relevant documents found."]
+
 
 
 
