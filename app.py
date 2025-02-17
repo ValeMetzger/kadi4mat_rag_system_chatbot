@@ -409,25 +409,6 @@ class SimpleRAG:
         self.index = None
         self.collection = None
 
-    def load_file(self, file_path: str) -> None:
-        """Loads a file and stores its content in the property documents."""
-        file_type = detect_file_type(file_path)
-        if file_type == "pdf":
-            self.documents = load_and_chunk_pdf(file_path)
-        elif file_type == "docx":
-            self.documents = [load_docx(file_path)]
-        elif file_type == "excel":
-            self.documents = [load_excel(file_path)]
-        elif file_type == "txt":
-            self.documents = [load_text(file_path)]
-        elif file_type == "md":
-            self.documents = [load_markdown(file_path)]
-        elif file_type == "csv":
-            self.documents = [load_csv(file_path)]
-        else:
-            raise ValueError(f"Unsupported file type: {file_path}")
-        print(f"{file_type.upper()} file processed successfully!")
-
     def build_vector_db(self) -> None:
         """Builds a vector database using the content of the documents."""
         if self.embeddings_model is None:
@@ -435,33 +416,108 @@ class SimpleRAG:
                 "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
             )
 
+        # Check if documents exist
+        if not self.documents:
+            raise ValueError("No documents available to build the vector database.")
+
         # Ensure self.documents is a list of dictionaries with "content" key
         valid_documents = [doc for doc in self.documents if isinstance(doc, dict) and "content" in doc]
-        if len(valid_documents) != len(self.documents):
-            print("Warning: Some documents are missing the 'content' key or are not dictionaries.")
+        if not valid_documents:
+            raise ValueError("No valid documents found. Documents must be dictionaries with a 'content' key.")
+        
+        print(f"Processing {len(valid_documents)} valid documents...")
 
+        # Extract text content
         texts = [doc["content"] for doc in valid_documents]
-        embeddings = self.embeddings_model.encode(texts, show_progress_bar=True)
         
-        # Initialize the ChromaDB client and collection
-        self.index = chromadb.Client()
-        self.collection = self.index.create_collection(name="documents")
+        # Validate texts
+        texts = [text for text in texts if text and isinstance(text, str) and len(text.strip()) > 0]
+        if not texts:
+            raise ValueError("No valid text content found in documents.")
         
-        # Generate unique IDs for each document
-        ids = [str(i) for i in range(len(texts))]
+        print(f"Generating embeddings for {len(texts)} text segments...")
         
-        self.collection.add(embeddings=embeddings, documents=texts, ids=ids)
-        print("Vector database built successfully!")
+        # Generate embeddings
+        try:
+            embeddings = self.embeddings_model.encode(texts, show_progress_bar=True)
+            if len(embeddings) == 0:
+                raise ValueError("Embedding generation failed - no embeddings produced")
+            print(f"Generated {len(embeddings)} embeddings successfully")
+        except Exception as e:
+            raise ValueError(f"Failed to generate embeddings: {str(e)}")
+
+        # Initialize ChromaDB
+        try:
+            self.index = chromadb.Client()
+            # Use a unique collection name or delete existing one
+            collection_name = "documents"
+            try:
+                self.index.delete_collection(collection_name)
+            except:
+                pass
+            self.collection = self.index.create_collection(name=collection_name)
+            
+            # Generate unique IDs
+            ids = [str(i) for i in range(len(texts))]
+            
+            # Add to collection
+            self.collection.add(
+                embeddings=embeddings.tolist(),  # Convert numpy array to list
+                documents=texts,
+                ids=ids
+            )
+            print("Vector database built successfully!")
+        except Exception as e:
+            raise ValueError(f"Failed to build vector database: {str(e)}")
+
+    def load_file(self, file_path: str) -> None:
+        """Loads a file and stores its content in the property documents."""
+        file_type = detect_file_type(file_path)
+        print(f"Loading {file_type} file: {file_path}")
+        
+        try:
+            if file_type == "pdf":
+                self.documents = load_and_chunk_pdf(file_path)
+            elif file_type == "docx":
+                self.documents = [load_docx(file_path)]
+            elif file_type == "excel":
+                self.documents = [load_excel(file_path)]
+            elif file_type == "txt":
+                self.documents = [load_text(file_path)]
+            elif file_type == "md":
+                self.documents = [load_markdown(file_path)]
+            elif file_type == "csv":
+                self.documents = [load_csv(file_path)]
+            else:
+                raise ValueError(f"Unsupported file type: {file_path}")
+            
+            if not self.documents:
+                raise ValueError(f"No content extracted from file: {file_path}")
+                
+            print(f"Successfully loaded {len(self.documents)} document segments")
+        except Exception as e:
+            raise ValueError(f"Failed to load file {file_path}: {str(e)}")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
-            """Searches for relevant documents using vector similarity."""
-            if self.collection is None:
-                raise ValueError("The vector database has not been built yet.")
-            
-            # Use embeddings_client
+        """Searches for relevant documents using vector similarity."""
+        if self.collection is None:
+            raise ValueError("The vector database has not been built yet.")
+        
+        try:
+            # Generate query embedding
             query_embedding = embeddings_client.feature_extraction([query])[0]
-            results = self.collection.query(embedding=query_embedding, top_k=k)
-            return [result["document"] for result in results] if results else ["No relevant documents found."]
+            
+            # Search in collection
+            results = self.collection.query(
+                query_embeddings=[query_embedding.tolist()],  # Convert to list and wrap in list
+                n_results=k
+            )
+            
+            # Extract and return documents
+            return results['documents'][0] if results['documents'] else ["No relevant documents found."]
+        except Exception as e:
+            print(f"Search failed: {str(e)}")
+            return ["Search failed. Please try again."]
 
 
 
@@ -518,37 +574,41 @@ def load_pdf(file_path):
 
 
 def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
-    """Parse file and prepare RAG."""
-
     if not file_names:
         raise gr.Error("No file selected")
+    
     progress(0, desc="Starting")
-    # Create connection to kadi
     manager = KadiManager(instance=instance, host=host, pat=token)
     record = manager.record(identifier=record_id)
+    
     progress(0.2, desc="Loading files...")
-    # Parse files
     documents = []
-    # Download
+    
     for file_name in file_names:
-        file_id = record.get_file_id(file_name)
-        with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-            print(temp_dir)
-            temp_file_location = os.path.join(temp_dir, file_name)
-            record.download_file(file_id, temp_file_location)
-            # parse document
-            user_rag = SimpleRAG()
-            user_rag.load_file(temp_file_location)
-            documents.extend(user_rag.documents)
+        try:
+            file_id = record.get_file_id(file_name)
+            with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+                temp_file_location = os.path.join(temp_dir, file_name)
+                record.download_file(file_id, temp_file_location)
+                
+                print(f"Processing file: {file_name}")
+                user_rag = SimpleRAG()
+                user_rag.load_file(temp_file_location)
+                print(f"Loaded {len(user_rag.documents)} documents from {file_name}")
+                documents.extend(user_rag.documents)
+        except Exception as e:
+            print(f"Error processing file {file_name}: {str(e)}")
 
+    print(f"Total documents loaded: {len(documents)}")
     progress(0.4, desc="Embedding documents...")
+    
+    user_rag = SimpleRAG()
     user_rag.documents = documents
     user_rag.embeddings_model = embeddings_model
     user_rag.build_vector_db()
-    # print(documents[:2])
-    print("user rag created")
-    progress(1, desc="ready to chat")
-    return "ready to chat", user_rag
+    
+    progress(1, desc="Ready to chat")
+    return "Ready to chat", user_rag
 
 
 def preprocess_response(response: str) -> str:
