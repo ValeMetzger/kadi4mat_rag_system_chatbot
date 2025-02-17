@@ -710,7 +710,7 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
                     "Still loading documents or no documents found. Please wait a moment and try again.",
                 )
             ],
-            "",
+            ""
         )
 
     try:
@@ -732,15 +732,14 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
         ]
         
         # Get response from LLM
-        response = client.chat_completion(
+        response = client.invoke(
             messages,
             max_tokens=2048,
             temperature=0.0
         )
         
-        response_content = "".join(
-            [choice.message["content"] for choice in response.choices if "content" in choice.message]
-        )
+        # Get the response content
+        response_content = response.content  # Updated to access content directly
         
         # Update history and return
         history.append((message, response_content))
