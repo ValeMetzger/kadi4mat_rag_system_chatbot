@@ -84,7 +84,7 @@ from huggingface_hub import InferenceClient
 #from langchain_groq import ChatGroq
 
 generator = pipeline('text-generation', 
-                    model='deepseek-ai/deepseek-llm-8b-base',
+                    model='meta-llama/Llama-2-8b-hf',
                     token=huggingfacehub_api_token)
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
