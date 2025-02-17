@@ -5,7 +5,7 @@ colorFrom: yellow
 colorTo: green
 sdk: gradio
 sdk_version: 4.44.1
-python_version: 3.10.4
+python_version: 3.10.16
 app_file: start.py
 pinned: false
 ---
