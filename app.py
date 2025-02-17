@@ -408,9 +408,34 @@ class SimpleRAG:
         self.embeddings_model = None
         self.index = None
         self.collection = None
+        self.is_initialized = False  # Add a flag to track initialization
 
     def build_vector_db(self) -> None:
         """Builds a vector database using the content of the documents."""
+        if self.embeddings_model is None:
+            self.embeddings_model = SentenceTransformer(
+                "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
+            )
+
+        # Use persistent client instead of in-memory
+        self.index = chromadb.PersistentClient(path="./chroma_db")
+        
+        # Use a unique collection name or delete existing one
+        collection_name = "documents"
+        try:
+            self.index.delete_collection(collection_name)
+        except:
+            pass
+        self.collection = self.index.create_collection(name=collection_name)
+
+        if not self.documents:
+            print("Warning: No documents available to build the vector database.")
+            return
+            
+        if self.is_initialized:
+            print("Vector database already initialized")
+            return
+        
         if self.embeddings_model is None:
             self.embeddings_model = SentenceTransformer(
                 "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
@@ -470,6 +495,8 @@ class SimpleRAG:
         except Exception as e:
             raise ValueError(f"Failed to build vector database: {str(e)}")
 
+        self.is_initialized = True
+
     def load_file(self, file_path: str) -> None:
         """Loads a file and stores its content in the property documents."""
         file_type = detect_file_type(file_path)
@@ -497,27 +524,24 @@ class SimpleRAG:
             print(f"Successfully loaded {len(self.documents)} document segments")
         except Exception as e:
             raise ValueError(f"Failed to load file {file_path}: {str(e)}")
+        
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
-        if self.collection is None:
-            raise ValueError("The vector database has not been built yet.")
+        if not self.collection:
+            print("Warning: No collection available for search")
+            return ["Please load documents first."]
         
         try:
-            # Generate query embedding
             query_embedding = embeddings_client.feature_extraction([query])[0]
-            
-            # Search in collection
             results = self.collection.query(
-                query_embeddings=[query_embedding.tolist()],  # Convert to list and wrap in list
+                query_embeddings=[query_embedding.tolist()],
                 n_results=k
             )
-            
-            # Extract and return documents
             return results['documents'][0] if results['documents'] else ["No relevant documents found."]
         except Exception as e:
             print(f"Search failed: {str(e)}")
-            return ["Search failed. Please try again."]
+            return [f"Search failed: {str(e)}"]
 
 
 
@@ -590,25 +614,19 @@ def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
             with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
                 temp_file_location = os.path.join(temp_dir, file_name)
                 record.download_file(file_id, temp_file_location)
-                
-                print(f"Processing file: {file_name}")
-                user_rag = SimpleRAG()
-                user_rag.load_file(temp_file_location)
-                print(f"Loaded {len(user_rag.documents)} documents from {file_name}")
-                documents.extend(user_rag.documents)
+                doc = load_file(temp_file_location)
+                documents.append(doc)
         except Exception as e:
             print(f"Error processing file {file_name}: {str(e)}")
 
-    print(f"Total documents loaded: {len(documents)}")
-    progress(0.4, desc="Embedding documents...")
-    
-    user_rag = SimpleRAG()
-    user_rag.documents = documents
-    user_rag.embeddings_model = embeddings_model
-    user_rag.build_vector_db()
+    # Create and initialize RAG system
+    rag = SimpleRAG()
+    rag.documents = documents
+    rag.embeddings_model = embeddings_model
+    rag.build_vector_db()
     
     progress(1, desc="Ready to chat")
-    return "Ready to chat", user_rag
+    return "Ready to chat", rag
 
 
 def preprocess_response(response: str) -> str:
@@ -628,6 +646,20 @@ def preprocess_response(response: str) -> str:
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     """Get respond from LLMs."""
+    if not user_session_rag or not user_session_rag.documents:
+        return (
+            history + [
+                (
+                    message,
+                    "Please load some documents first before asking questions.",
+                )
+            ],
+            "",
+        )
+
+    # Ensure the vector database is built
+    if not user_session_rag.is_initialized:
+        user_session_rag.build_vector_db()
 
     # Ensure the vector database is built
     if user_session_rag.collection is None:
