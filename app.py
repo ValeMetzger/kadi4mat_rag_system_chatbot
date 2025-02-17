@@ -42,6 +42,7 @@ from PyPDF2 import PdfReader
 from docx import Document as DocxReader
 import pandas as pd
 import chromadb
+from transformers import pipeline
 
 # Kadi OAuth settings
 load_dotenv()
@@ -80,9 +81,61 @@ oauth.register(
 
 # Global LLM client
 from huggingface_hub import InferenceClient
-from langchain_groq import ChatGroq
+#from langchain_groq import ChatGroq
 
-client = ChatGroq(model="llama-3.1-70b-versatile", temperature=0, api_key=GROQ_API_KEY)
+generator = pipeline('text-generation', 
+                    model='deepseek-ai/deepseek-llm-8b-base',
+                    token=huggingfacehub_api_token)
+
+def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
+    """Get respond from LLMs."""
+    
+    if not user_session_rag or not hasattr(user_session_rag, 'documents') or not user_session_rag.documents:
+        return (
+            history + [
+                (
+                    message,
+                    "Still loading documents or no documents found. Please wait a moment and try again.",
+                )
+            ],
+            ""
+        )
+
+    try:
+        # Get relevant documents
+        retrieved_docs = user_session_rag.search_documents(message)
+        context = "\n".join(retrieved_docs)
+        
+        # Prepare prompt
+        prompt = f"""Based on the following context, please answer the question.
+
+Context:
+{context}
+
+Question: {message}
+
+Answer:"""
+        
+        # Generate response using Hugging Face model
+        response = generator(prompt, 
+                           max_length=2048, 
+                           num_return_sequences=1,
+                           temperature=0.7)
+        
+        # Extract the generated text
+        response_content = response[0]['generated_text']
+        
+        # Clean up the response by removing the prompt
+        response_content = response_content.replace(prompt, "").strip()
+        
+        # Update history and return
+        history.append((message, response_content))
+        return history, ""
+        
+    except Exception as e:
+        error_message = f"Error processing your request: {str(e)}"
+        history.append((message, error_message))
+        return history, ""
 
 # Mixed-usage of huggingface client and local model for showing 2 possibilities
 embeddings_client = InferenceClient(
