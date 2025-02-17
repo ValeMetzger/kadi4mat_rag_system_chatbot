@@ -770,31 +770,25 @@ with gr.Blocks() as main_demo:
         with gr.Column(scale=1):
             gr.Button("Logout", link="/logout")
 
-    # Loading status indicator
     loading_status = gr.Markdown("Initializing system and loading records...")
-
-    # Add a loading state to your Gradio interface
     loading_state = gr.State(True)  # Start as True (loading)
-    status_message = gr.Markdown("Loading documents...")
 
-    # Update these when loading completes
-    loading_state.value = False
-    status_message.value = "Ready to chat!"
-
-    @gr.on(main_demo.load)
-    async def initialize_rag(request: gr.Request):
+    async def initialize_system(request: gr.Request):
         try:
             user_token = request.request.session["user_access_token"]
             num_docs = await process_all_records_and_files(user_token)
             loading_state.value = False
-            status = f"Ready to chat! Loaded {num_docs} documents from your records."
+            return f"Ready to chat! Loaded {num_docs} documents from your records."
         except Exception as e:
             loading_state.value = False
-            status = f"Error loading records: {str(e)}"
-        return gr.Markdown(value=status)
+            return f"Error loading records: {str(e)}"
 
     # Update loading status when initialization completes
-    main_demo.load(initialize_rag, None, loading_status)
+    main_demo.load(
+        fn=initialize_system,
+        inputs=None,
+        outputs=loading_status,
+    )
 
     # Main chat interface
     with gr.Tab("Chat"):
