@@ -437,7 +437,11 @@ class SimpleRAG:
         # Initialize the ChromaDB client and collection
         self.index = chromadb.Client()
         self.collection = self.index.create_collection(name="documents")
-        self.collection.add(embeddings=embeddings, documents=texts)
+        
+        # Generate unique IDs for each document
+        ids = [str(i) for i in range(len(texts))]
+        
+        self.collection.add(embeddings=embeddings, documents=texts, ids=ids)
         print("Vector database built successfully!")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
