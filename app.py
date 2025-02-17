@@ -104,7 +104,7 @@ def get_user(request: Request):
         return None
     if token:
         try:
-            manager = KadiManager(instance=instance, host=host, token=token)
+            manager = KadiManager(instance=instance, host=host, pat=token)
             user = manager.pat_user
             return user.meta["displayname"]
         except kadi_apy.lib.exceptions.KadiAPYRequestError as e:
