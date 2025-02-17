@@ -441,10 +441,7 @@ class SimpleRAG:
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
         # Use embeddings_client
-        embedding_responses = embeddings_client.feature_extraction(
-            inputs=[query]
-        )
-        query_embedding = embedding_responses[0]
+        query_embedding = embeddings_client.encode([query])[0]
         results = self.index.query(query_embedding, top_k=k)
         return results if results else ["No relevant documents found."]
 
