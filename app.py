@@ -441,7 +441,7 @@ class SimpleRAG:
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
         # Use embeddings_client
-        query_embedding = embeddings_client.encode([query])[0]
+        query_embedding = embeddings_client.feature_extraction([query])[0]
         results = self.index.query(query_embedding, top_k=k)
         return results if results else ["No relevant documents found."]
 
@@ -565,7 +565,7 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     #     #if val[0]:
     #     messages.append({"role": "user", "content": val[0]})
     #     #if val[1]:
-    #     messages.append({"role": "assistant", "content": val[1]})
+    #     messages.append({"role": "assistant", "content": val[1]}]
 
     messages.append({"role": "user", "content": f"\nQuestion: {message}"})
 
