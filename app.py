@@ -787,10 +787,11 @@ with gr.Blocks() as main_demo:
             user_token = request.request.session["user_access_token"]
             num_docs = await process_all_records_and_files(user_token)
             loading_state.value = False
-            return f"Ready to chat! Loaded {num_docs} documents from your records."
+            status = f"Ready to chat! Loaded {num_docs} documents from your records."
         except Exception as e:
             loading_state.value = False
-            return f"Error loading records: {str(e)}"
+            status = f"Error loading records: {str(e)}"
+        return gr.Markdown(value=status)
 
     # Update loading status when initialization completes
     main_demo.load(initialize_rag, None, loading_status)
