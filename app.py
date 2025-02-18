@@ -90,52 +90,6 @@ client = InferenceClient(
 )
 
 
-
-def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
-    """Get respond from LLMs."""
-    
-    if not user_session_rag or not hasattr(user_session_rag, 'documents') or not user_session_rag.documents:
-        return (
-            history + [
-                (
-                    message,
-                    "Still loading documents or no documents found. Please wait a moment and try again.",
-                )
-            ],
-            ""
-        )
-
-    try:
-        # Get relevant documents
-        retrieved_docs = user_session_rag.search_documents(message)
-        context = "\n".join(retrieved_docs)
-        
-        # Llama 3 specific prompt format
-        prompt = f"""<s>[INST] You are a helpful assistant. Use the following context to answer the user's question accurately and concisely.
-
-Context:
-{context}
-
-Question: {message} [/INST]"""
-        
-        # Generate response using Llama 3
-        response = client.text_generation(
-            prompt,
-            max_new_tokens=2048,
-            temperature=0.7,
-            top_p=0.95,
-            repetition_penalty=1.1
-        )
-        
-        # Update history and return
-        history.append((message, response))
-        return history, ""
-        
-    except Exception as e:
-        error_message = f"Error processing your request: {str(e)}"
-        history.append((message, error_message))
-        return history, ""
-
 # Mixed-usage of huggingface client and local model for showing 2 possibilities
 embeddings_client = InferenceClient(
     model="sentence-transformers/all-mpnet-base-v2", token=huggingfacehub_api_token
@@ -770,31 +724,25 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
         retrieved_docs = user_session_rag.search_documents(message)
         context = "\n".join(retrieved_docs)
         
-        # Prepare system message with context
-        system_message = (
-            "You are an assistant helping with Kadi documents. "
-            "Here are the relevant documents to answer the question:\n\n"
-            f"{context}"
+        # Llama 3 specific prompt format
+        prompt = f"""<s>[INST] You are a helpful assistant. Use the following context to answer the user's question accurately and concisely.
+
+Context:
+{context}
+
+Question: {message} [/INST]"""
+        
+        # Generate response using Llama 3
+        response = client.text_generation(
+            prompt,
+            max_new_tokens=2048,
+            temperature=0.7,
+            top_p=0.95,
+            repetition_penalty=1.1
         )
-        
-        # Prepare messages for the LLM
-        messages = [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": message}
-        ]
-        
-        # Get response from LLM
-        response = client.invoke(
-            messages,
-            max_tokens=2048,
-            temperature=0.0
-        )
-        
-        # Get the response content
-        response_content = response.content  # Updated to access content directly
         
         # Update history and return
-        history.append((message, response_content))
+        history.append((message, response))
         return history, ""
         
     except Exception as e:
