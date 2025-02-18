@@ -722,7 +722,11 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     try:
         # Get relevant documents
         retrieved_docs = user_session_rag.search_documents(message)
+        
+        # Limit context length to approximately 4000 characters (rough estimate for tokens)
         context = "\n".join(retrieved_docs)
+        if len(context) > 4000:
+            context = context[:4000] + "..."
         
         # Llama 3 specific prompt format
         prompt = f"""<s>[INST] You are a helpful assistant. Use the following context to answer the user's question accurately and concisely.
@@ -732,10 +736,10 @@ Context:
 
 Question: {message} [/INST]"""
         
-        # Generate response using Llama 3
+        # Generate response using Llama 3 with reduced max_tokens
         response = client.text_generation(
             prompt,
-            max_new_tokens=2048,
+            max_new_tokens=1024,  # Reduced from 2048
             temperature=0.7,
             top_p=0.95,
             repetition_penalty=1.1
