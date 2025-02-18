@@ -720,33 +720,42 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
         )
 
     try:
-        # Get relevant documents
-        retrieved_docs = user_session_rag.search_documents(message)
+        # Get relevant documents and limit to top 3 most relevant
+        retrieved_docs = user_session_rag.search_documents(message)[:3]
         
-        # Limit context length to approximately 4000 characters (rough estimate for tokens)
+        # Limit context length and clean it
         context = "\n".join(retrieved_docs)
-        if len(context) > 4000:
-            context = context[:4000] + "..."
+        if len(context) > 3000:
+            context = context[:3000] + "..."
         
-        # Llama 3 specific prompt format
-        prompt = f"""<s>[INST] You are a helpful assistant. Use the following context to answer the user's question accurately and concisely.
+        # Improved prompt format
+        prompt = f"""<s>[INST] You are a helpful assistant. Answer the following question based on the provided context. Be clear and concise.
 
 Context:
 {context}
 
-Question: {message} [/INST]"""
+Question: {message}
+
+Please provide a clear, well-structured answer. [/INST]"""
         
-        # Generate response using Llama 3 with reduced max_tokens
+        # Generate response
         response = client.text_generation(
             prompt,
-            max_new_tokens=1024,  # Reduced from 2048
-            temperature=0.7,
+            max_new_tokens=512,  # Reduced further
+            temperature=0.3,  # Reduced for more focused responses
             top_p=0.95,
-            repetition_penalty=1.1
+            repetition_penalty=1.1,
+            do_sample=True
         )
         
+        # Clean up the response
+        cleaned_response = response.strip()
+        if cleaned_response.startswith("<s>") or cleaned_response.startswith("[INST]"):
+            cleaned_response = cleaned_response.split("[/INST]")[-1]
+        cleaned_response = cleaned_response.replace("</s>", "").strip()
+        
         # Update history and return
-        history.append((message, response))
+        history.append((message, cleaned_response))
         return history, ""
         
     except Exception as e:
