@@ -85,7 +85,7 @@ from huggingface_hub import InferenceClient
 
 
 client = InferenceClient(
-    model="meta-llama/Meta-Llama-3-8B-Instruct",
+    model="meta-llama/Meta-Llama-3.1-8B-Instruct",
     token=huggingfacehub_api_token
 )
 
