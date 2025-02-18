@@ -83,9 +83,13 @@ oauth.register(
 from huggingface_hub import InferenceClient
 #from langchain_groq import ChatGroq
 
-generator = pipeline('text-generation', 
-                    model='meta-llama/Llama-2-8b-hf',
-                    token=huggingfacehub_api_token)
+
+client = InferenceClient(
+    model="meta-llama/Meta-Llama-3-8B-Instruct",
+    token=huggingfacehub_api_token
+)
+
+
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     """Get respond from LLMs."""
@@ -106,30 +110,25 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
         retrieved_docs = user_session_rag.search_documents(message)
         context = "\n".join(retrieved_docs)
         
-        # Prepare prompt
-        prompt = f"""Based on the following context, please answer the question.
+        # Llama 3 specific prompt format
+        prompt = f"""<s>[INST] You are a helpful assistant. Use the following context to answer the user's question accurately and concisely.
 
 Context:
 {context}
 
-Question: {message}
-
-Answer:"""
+Question: {message} [/INST]"""
         
-        # Generate response using Hugging Face model
-        response = generator(prompt, 
-                           max_length=2048, 
-                           num_return_sequences=1,
-                           temperature=0.7)
-        
-        # Extract the generated text
-        response_content = response[0]['generated_text']
-        
-        # Clean up the response by removing the prompt
-        response_content = response_content.replace(prompt, "").strip()
+        # Generate response using Llama 3
+        response = client.text_generation(
+            prompt,
+            max_new_tokens=2048,
+            temperature=0.7,
+            top_p=0.95,
+            repetition_penalty=1.1
+        )
         
         # Update history and return
-        history.append((message, response_content))
+        history.append((message, response))
         return history, ""
         
     except Exception as e:
