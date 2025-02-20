@@ -592,6 +592,7 @@ with gr.Blocks() as login_demo:
 
 # A simple RAG implementation
 class SimpleRAG:
+    """Retrieval Augmented Generation system for document Q&A."""
     def __init__(self):
         self.document_processor = DocumentProcessor()
         self.embeddings = HuggingFaceEmbeddings(
@@ -607,31 +608,41 @@ class SimpleRAG:
             if not self.documents:
                 return False
             
-            # Check cache for processed documents
+            # Instead of caching the vector store, we'll cache the processed texts and metadata
             cache_key = cache_manager.get_cache_key(str(self.documents))
             cached_data = cache_manager.get_cached(cache_key)
             
             if cached_data:
-                self.vector_store = cached_data
-                return True
-            
-            # Process documents if not cached
-            processed_texts = []
-            metadatas = []
-            
-            for idx, doc in enumerate(self.documents):
-                clean_text = self.document_processor.preprocess_document(doc['content'])
-                chunks = self.document_processor.chunk_document(clean_text)
+                processed_texts, metadatas = cached_data
+                print("Using cached processed documents")
+            else:
+                processed_texts = []
+                metadatas = []
                 
-                for chunk_idx, chunk in enumerate(chunks):
-                    processed_texts.append(chunk)
-                    metadatas.append({
-                        "source": doc.get('source', ''),
-                        "doc_id": f"doc_{idx}",
-                        "chunk_id": f"chunk_{chunk_idx}",
-                        **doc.get('metadata', {})
-                    })
+                for idx, doc in enumerate(self.documents):
+                    if not isinstance(doc.get('content', ''), str):
+                        print(f"Skipping document {doc.get('source', 'unknown')}: invalid content type")
+                        continue
+                        
+                    clean_text = self.document_processor.preprocess_document(doc['content'])
+                    chunks = self.document_processor.chunk_document(clean_text)
+                    
+                    for chunk_idx, chunk in enumerate(chunks):
+                        processed_texts.append(chunk)
+                        metadatas.append({
+                            "source": doc.get('source', ''),
+                            "doc_id": f"doc_{idx}",
+                            "chunk_id": f"chunk_{chunk_idx}",
+                            **doc.get('metadata', {})
+                        })
+                
+                # Cache the processed texts and metadata instead of the vector store
+                cache_manager.set_cached(cache_key, (processed_texts, metadatas))
             
+            if not processed_texts:
+                return False
+                
+            # Create a new vector store from the processed texts
             self.vector_store = Chroma.from_texts(
                 texts=processed_texts,
                 metadatas=metadatas,
@@ -639,13 +650,13 @@ class SimpleRAG:
                 collection_name="documents"
             )
             
-            # Cache the processed data
-            cache_manager.set_cached(cache_key, self.vector_store)
-            
+            print(f"Successfully created vector store with {len(processed_texts)} chunks")
             return True
             
         except Exception as e:
             print(f"Error building vector database: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return False
         
     def add_documents(self, documents: List[str]):
@@ -727,29 +738,27 @@ class SimpleRAG:
         """Get the number of original documents."""
         return len(self.documents)
     
-    def get_context_for_query(self, query: str) -> str:
-        """Get formatted context for a query."""
+    def get_context_for_query(self, query: str, k: int = 3) -> str:
+        """Retrieve relevant context for a query."""
         try:
-            relevant_chunks = self.search_documents(query)
-            if not relevant_chunks:
+            if not self.vector_store:
                 return ""
             
-            # Format context with clear section breaks
-            context = "\n---\n".join(relevant_chunks)
+            results = self.vector_store.similarity_search_with_score(query, k=k)
             
-            # Limit context length
-            if len(context) > 2000:
-                context = context[:1997] + "..."
+            relevant_chunks = []
+            for doc, score in results:
+                if score < 1.5:  # Adjust threshold as needed
+                    relevant_chunks.append(doc.page_content)
             
-            return context
-            
+            return "\n---\n".join(relevant_chunks)
         except Exception as e:
             print(f"Error getting context: {str(e)}")
             return ""
     
-    def is_initialized(self) -> bool:
-            """Check if the RAG system is properly initialized."""
-            return self.vector_store is not None and len(self.documents) > 0
+def is_initialized(self) -> bool:
+        """Check if the RAG system is properly initialized."""
+        return self.vector_store is not None and len(self.documents) > 0
 
 
 
