@@ -47,7 +47,6 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import logging
 import asyncio
-from asyncio import timeout
 
 import nltk
 nltk.download(['punkt', 'punkt_tab', 'averaged_perceptron_tagger'])
@@ -612,9 +611,9 @@ class SimpleRAG:
 
     async def create_vector_db(self):
         """Initialize the vector database with proper progress updates."""
-        async with timeout(300):  # 5 minutes timeout
+        try:
             logger.debug("Starting vectorDB creation with timeout...")
-            try:
+            async def _create_db():
                 logger.debug("Starting async vectorDB creation...")
                 if not self.documents:
                     return False
@@ -654,111 +653,116 @@ class SimpleRAG:
                 print("Vector store created successfully!")
                 logger.debug("Async operation completed")
                 return True
-                
-            except Exception as e:
-                print(f"Error building vector database: {str(e)}")
-                return False
+
+            return await asyncio.wait_for(_create_db(), timeout=300)  # 5 minutes timeout
             
-        def add_documents(self, documents: List[str]):
-            """Process and add documents to the RAG system."""
-            try:
-                processed_chunks = []
-                for doc in documents:
-                    # Preprocess and chunk the document
-                    clean_text = self.document_processor.preprocess_document(doc)
-                    chunks = self.document_processor.chunk_document(clean_text)
-                    processed_chunks.extend(chunks)
-                
-                # Store original documents
-                self.documents = documents
-                
-                # Initialize or update vector store
-                if not self.vector_store:
-                    self.vector_store = Chroma(
-                        collection_name="documents",
-                        embedding_function=self.embeddings
-                    )
-                
-                # Add documents with metadata
-                self.vector_store.add_texts(
-                    texts=processed_chunks,
-                    metadatas=[{
-                        "chunk_id": i,
-                        "doc_id": f"doc_{i//5}"  # Assuming ~5 chunks per doc
-                    } for i in range(len(processed_chunks))]
+        except asyncio.TimeoutError:
+            print("Vector database creation timed out after 5 minutes")
+            return False
+        except Exception as e:
+            print(f"Error building vector database: {str(e)}")
+            return False
+
+    def add_documents(self, documents: List[str]):
+        """Process and add documents to the RAG system."""
+        try:
+            processed_chunks = []
+            for doc in documents:
+                # Preprocess and chunk the document
+                clean_text = self.document_processor.preprocess_document(doc)
+                chunks = self.document_processor.chunk_document(clean_text)
+                processed_chunks.extend(chunks)
+            
+            # Store original documents
+            self.documents = documents
+            
+            # Initialize or update vector store
+            if not self.vector_store:
+                self.vector_store = Chroma(
+                    collection_name="documents",
+                    embedding_function=self.embeddings
                 )
-                
-                return len(processed_chunks)
-                
-            except Exception as e:
-                print(f"Error adding documents: {str(e)}")
-                return 0
-        
-        def search_documents(self, query: str, k: int = 3) -> List[str]:
-            """Search for relevant document chunks."""
-            try:
-                if not self.vector_store:
-                    return []
-                
-                # Search with scores
-                results = self.vector_store.similarity_search_with_score(
-                    query,
-                    k=k
-                )
-                
-                # Filter and sort results
-                threshold = 0.7
-                filtered_results = []
-                seen_doc_ids = set()
-                
-                for doc, score in results:
-                    if score > threshold:
-                        doc_id = doc.metadata.get('doc_id')
-                        if doc_id not in seen_doc_ids:  # Avoid duplicate docs
-                            filtered_results.append(doc.page_content)
-                            seen_doc_ids.add(doc_id)
-                
-                return filtered_results
-                
-            except Exception as e:
-                print(f"Error searching documents: {str(e)}")
+            
+            # Add documents with metadata
+            self.vector_store.add_texts(
+                texts=processed_chunks,
+                metadatas=[{
+                    "chunk_id": i,
+                    "doc_id": f"doc_{i//5}"  # Assuming ~5 chunks per doc
+                } for i in range(len(processed_chunks))]
+            )
+            
+            return len(processed_chunks)
+            
+        except Exception as e:
+            print(f"Error adding documents: {str(e)}")
+            return 0
+    
+    def search_documents(self, query: str, k: int = 3) -> List[str]:
+        """Search for relevant document chunks."""
+        try:
+            if not self.vector_store:
                 return []
-        
-        def clear_documents(self):
-            """Clear all documents from the RAG system."""
-            try:
-                if self.vector_store:
-                    self.vector_store.delete_collection()
-                    self.vector_store = None
-                self.documents = []
-            except Exception as e:
-                print(f"Error clearing documents: {str(e)}")
-        
-        def get_document_count(self) -> int:
-            """Get the number of original documents."""
-            return len(self.documents)
-        
-        def get_context_for_query(self, query: str, k: int = 3) -> str:
-            """Retrieve relevant context for a query."""
-            try:
-                if not self.vector_store:
-                    return ""
-                
-                results = self.vector_store.similarity_search_with_score(query, k=k)
-                
-                relevant_chunks = []
-                for doc, score in results:
-                    if score < 1.5:  # Adjust threshold as needed
-                        relevant_chunks.append(doc.page_content)
-                
-                return "\n---\n".join(relevant_chunks)
-            except Exception as e:
-                print(f"Error getting context: {str(e)}")
+            
+            # Search with scores
+            results = self.vector_store.similarity_search_with_score(
+                query,
+                k=k
+            )
+            
+            # Filter and sort results
+            threshold = 0.7
+            filtered_results = []
+            seen_doc_ids = set()
+            
+            for doc, score in results:
+                if score > threshold:
+                    doc_id = doc.metadata.get('doc_id')
+                    if doc_id not in seen_doc_ids:  # Avoid duplicate docs
+                        filtered_results.append(doc.page_content)
+                        seen_doc_ids.add(doc_id)
+            
+            return filtered_results
+            
+        except Exception as e:
+            print(f"Error searching documents: {str(e)}")
+            return []
+    
+    def clear_documents(self):
+        """Clear all documents from the RAG system."""
+        try:
+            if self.vector_store:
+                self.vector_store.delete_collection()
+                self.vector_store = None
+            self.documents = []
+        except Exception as e:
+            print(f"Error clearing documents: {str(e)}")
+    
+    def get_document_count(self) -> int:
+        """Get the number of original documents."""
+        return len(self.documents)
+    
+    def get_context_for_query(self, query: str, k: int = 3) -> str:
+        """Retrieve relevant context for a query."""
+        try:
+            if not self.vector_store:
                 return ""
-        
-        def is_initialized(self) -> bool:
-            """Check if the RAG system is properly initialized."""
-            return self.vector_store is not None and len(self.documents) > 0
+            
+            results = self.vector_store.similarity_search_with_score(query, k=k)
+            
+            relevant_chunks = []
+            for doc, score in results:
+                if score < 1.5:  # Adjust threshold as needed
+                    relevant_chunks.append(doc.page_content)
+            
+            return "\n---\n".join(relevant_chunks)
+        except Exception as e:
+            print(f"Error getting context: {str(e)}")
+            return ""
+    
+    def is_initialized(self) -> bool:
+        """Check if the RAG system is properly initialized."""
+        return self.vector_store is not None and len(self.documents) > 0
 
 
 def load_pdf(file_path):
