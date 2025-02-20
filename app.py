@@ -761,18 +761,27 @@ def preprocess_response(response: str) -> str:
 
 def clean_response(response: str) -> str:
     """Clean up model response."""
-    # Remove any system prompts or artifacts
-    if "[/INST]" in response:
-        response = response.split("[/INST]")[-1]
-    
-    # Remove any remaining special tokens
-    response = response.replace("<s>", "").replace("</s>", "")
-    response = response.replace("[INST]", "").strip()
-    
-    # Remove any repeated whitespace
-    response = " ".join(response.split())
-    
-    return response
+    try:
+        # Remove any system prompts or artifacts
+        if "[/INST]" in response:
+            response = response.split("[/INST]")[-1]
+        
+        # Remove any remaining special tokens
+        response = response.replace("<s>", "").replace("</s>", "")
+        response = response.replace("[INST]", "").strip()
+        
+        # Remove any repeated whitespace
+        response = " ".join(response.split())
+        
+        # Basic sanity check
+        if len(response.strip()) < 10:
+            return "I apologize, but I couldn't generate a proper response. Please try rephrasing your question."
+            
+        return response
+        
+    except Exception as e:
+        print(f"Error cleaning response: {str(e)}")
+        return "Error: Could not process the response properly."
 
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
@@ -783,32 +792,43 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
         if not context:
             return history + [(message, "I couldn't find any relevant information in the documents to answer your question.")], ""
         
-        # Construct the prompt with the retrieved context
-        prompt = f"""<s>[INST] You are a helpful assistant. Use the following context to answer the user's question.
-        If you cannot answer the question based on the context, say so.
+        # Construct a more detailed prompt
+        prompt = f"""<s>[INST] You are a helpful assistant analyzing documents. Your task is to provide detailed, well-structured answers based on the provided context.
 
-Context:
+Context from documents:
 {context}
 
 User Question: {message}
 
-Please provide a clear and specific answer based on the context provided. [/INST]"""
+Please provide a comprehensive answer that:
+1. Directly addresses the user's question
+2. Includes specific details from the context
+3. Is well-organized and easy to understand
+4. Mentions if any information is unclear or missing
+
+Remember to focus only on information present in the context. If you can't fully answer the question from the context, explain what you can answer and what information is missing. [/INST]"""
         
         response = client.text_generation(
             prompt,
-            max_new_tokens=256,
-            temperature=0.1,
+            max_new_tokens=512,  # Increased from 256 to allow longer responses
+            temperature=0.7,  # Increased from 0.1 to allow more natural responses
             top_p=0.9,
             repetition_penalty=1.2,
             do_sample=True,
             stop_sequences=["</s>", "[INST]"]
         )
         
+        # Better response cleaning
         cleaned_response = clean_response(response)
+        
+        # Verify response isn't too short or corrupted
+        if len(cleaned_response) < 20 or '[' in cleaned_response or ']' in cleaned_response:
+            return history + [(message, "I apologize, but I couldn't generate a proper response. Please try rephrasing your question.")], ""
+        
         return history + [(message, cleaned_response)], ""
         
     except Exception as e:
-        error_msg = f"Error: {str(e)}"
+        error_msg = f"Error generating response: {str(e)}"
         print(error_msg)
         return history + [(message, error_msg)], ""
 
