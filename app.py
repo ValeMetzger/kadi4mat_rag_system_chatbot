@@ -46,7 +46,10 @@ from transformers import AutoTokenizer
 from huggingface_hub import InferenceClient
 from typing import List, Tuple
 import re
+
 import nltk
+nltk.download(['punkt', 'punkt_tab', 'averaged_perceptron_tagger'])
+
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 
@@ -231,10 +234,23 @@ def load_excel(file_path):
     return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "excel"}}
 
 def load_text(file_path):
-    """Read plain text from a TXT file."""
-    with open(file_path, 'r', encoding='utf-8') as f:
-        text = f.read()
-    return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "txt"}}
+    """Enhanced text file loading with encoding fallback."""
+    encodings = ['utf-8', 'latin-1', 'cp1252']
+    for encoding in encodings:
+        try:
+            with open(file_path, 'r', encoding=encoding) as f:
+                text = f.read()
+                if text.strip():  # Check if content is not empty
+                    return {
+                        "source": Path(file_path).name,
+                        "content": text,
+                        "metadata": {
+                            "file_type": "txt" if not file_path.endswith('.py') else "python"
+                        }
+                    }
+        except UnicodeDecodeError:
+            continue
+    return None
 
 def load_markdown(file_path):
     """Convert Markdown content to plain text."""
@@ -249,34 +265,40 @@ def load_csv(file_path):
     return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "csv"}}
 
 def load_file(file_path):
-    """Unified loader for different file types."""
-    file_type = detect_file_type(file_path)
-    if file_type == "pdf":
-        return load_pdf(file_path)
-    elif file_type == "docx":
-        return load_docx(file_path)
-    elif file_type == "excel":
-        return load_excel(file_path)
-    elif file_type == "txt":
-        return load_text(file_path)
-    elif file_type == "md":
-        return load_markdown(file_path)
-    elif file_type == "csv":
-        return load_csv(file_path)
-    else:
-        raise ValueError(f"Unsupported file type: {file_path}")
+    """Unified loader for different file types with enhanced error handling."""
+    try:
+        file_type = detect_file_type(file_path)
+        if file_type == "pdf":
+            return load_pdf(file_path)
+        elif file_type == "docx":
+            return load_docx(file_path)
+        elif file_type == "excel":
+            return load_excel(file_path)
+        elif file_type == "txt":  # This now handles .txt, .py, and .flow files
+            return load_text(file_path)
+        elif file_type == "md":
+            return load_markdown(file_path)
+        elif file_type == "csv":
+            return load_csv(file_path)
+        else:
+            raise ValueError(f"Unsupported file type: {file_path}")
+    except Exception as e:
+        print(f"Error in load_file for {file_path}: {str(e)}")
+        return None
 
 def detect_file_type(file_path):
-    """Detect file type using mimetypes and file extension."""
+    """Enhanced file type detection."""
     mime_type, _ = mimetypes.guess_type(file_path)
     ext = Path(file_path).suffix.lower()
+    
+    # Extended file type mapping
     if mime_type == "application/pdf" or ext == ".pdf":
         return "pdf"
     elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or ext == ".docx":
         return "docx"
     elif mime_type in ["application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] or ext in [".xls", ".xlsx"]:
         return "excel"
-    elif mime_type == "text/plain" or ext == ".txt":
+    elif mime_type == "text/plain" or ext in [".txt", ".py", ".flow"]:  # Added support for Python and flow files
         return "txt"
     elif mime_type == "text/markdown" or ext == ".md":
         return "md"
@@ -308,7 +330,7 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
                     file_name = file_info["name"]
                     try:
                         file_id = record.get_file_id(file_name)
-                        with tempfile.TemporaryDirectory() as temp_dir:  # Fixed typo in TemporaryDirectory
+                        with tempfile.TemporaryDirectory() as temp_dir:
                             temp_file_path = os.path.join(temp_dir, file_name)
                             record.download_file(file_id, temp_file_path)
                             
@@ -316,7 +338,8 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
                                 file_type = detect_file_type(temp_file_path)
                                 doc = load_file(temp_file_path)
                                 
-                                if doc:  # Only add if document was successfully loaded
+                                # Check if document content is not empty
+                                if doc and doc.get('content') and len(doc['content'].strip()) > 0:
                                     doc["metadata"].update({
                                         "record_id": record_id,
                                         "file_name": file_name,
@@ -324,6 +347,8 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
                                     })
                                     documents.append(doc)
                                     print(f"Successfully loaded: {file_name}")
+                                else:
+                                    print(f"Skipped empty document: {file_name}")
                             except Exception as e:
                                 print(f"Error loading file {file_name}: {str(e)}")
                                 continue
@@ -338,18 +363,23 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
                 print(f"Error processing record {record_id}: {str(e)}")
                 continue
         
-        # Initialize RAG system
+        # Initialize RAG system only if we have documents
         if documents:
-            rag = SimpleRAG()
-            rag.documents = documents
-            success = rag.build_vector_db()
-            if success:
-                return len(documents)
-            else:
-                print("Failed to build vector database")
+            try:
+                rag = SimpleRAG()
+                rag.documents = documents
+                success = rag.build_vector_db()
+                if success:
+                    print(f"Successfully processed {len(documents)} documents")
+                    return len(documents)
+                else:
+                    print("Failed to build vector database")
+                    return 0
+            except Exception as e:
+                print(f"Error building vector database: {str(e)}")
                 return 0
         else:
-            print("No documents were loaded")
+            print("No valid documents were loaded")
             return 0
             
     except Exception as e:
@@ -494,7 +524,10 @@ with gr.Blocks() as login_demo:
 class SimpleRAG:
     def __init__(self):
         self.document_processor = DocumentProcessor()
-        self.embeddings = HuggingFaceEmbeddings()
+        # Explicitly specify the model name
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-mpnet-base-v2"
+        )
         self.vector_store = None
         self.documents = []
 
