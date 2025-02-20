@@ -108,7 +108,9 @@ embeddings_model = SentenceTransformer(
 class DocumentProcessor:
     def __init__(self):
         self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-        nltk.download('punkt', quiet=True)
+        # Import nltk and download punkt (not punkt_tab)
+        import nltk
+        nltk.download('punkt', quiet=True)  # This is the correct resource name
     
     def preprocess_document(self, text: str) -> str:
         """Clean and preprocess document text."""
@@ -468,7 +470,9 @@ with gr.Blocks() as login_demo:
 class SimpleRAG:
     def __init__(self):
         self.document_processor = DocumentProcessor()
-        self.embeddings = HuggingFaceEmbeddings()
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-mpnet-base-v2"
+        )
         self.vector_store = None
         self.documents = []
         
