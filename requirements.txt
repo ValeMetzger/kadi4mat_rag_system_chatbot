@@ -19,3 +19,5 @@ huggingface_hub
 PyYAML
 pymupdf
 chromadb
+nltk
+transformers
