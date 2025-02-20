@@ -45,20 +45,12 @@ from typing import List, Tuple
 import re
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-import logging
 
 import nltk
 nltk.download(['punkt', 'punkt_tab', 'averaged_perceptron_tagger'])
 
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # Kadi OAuth settings
 load_dotenv()
@@ -377,21 +369,14 @@ def detect_file_type(file_path):
     return ALLOWED_EXTENSIONS.get(ext, None)
     
 def process_file(manager, record_id, file_info):
-    """Process a single file with improved filtering and caching."""
+    """Process a single file with improved filtering."""
     try:
         file_name = file_info["name"]
         
-        # Use cache if available
-        cache_key = f"{record_id}_{file_name}"
-        cached_doc = cache_manager.get_cached(cache_key)
-        if cached_doc:
-            logger.info(f"Using cached version of {file_name}")
-            return cached_doc
-        
-        # Check file type and size early
+        # Check if file type is supported before processing
         file_type = detect_file_type(Path(file_name))
         if not file_type:
-            logger.info(f"Skipping unsupported file type: {file_name}")
+            print(f"Skipping unsupported file type: {file_name}")
             return None
         
         record = manager.record(identifier=record_id)
@@ -402,82 +387,74 @@ def process_file(manager, record_id, file_info):
             
             try:
                 record.download_file(file_id, temp_file_path)
-                
-                # Skip large files early
-                if os.path.getsize(temp_file_path) > 10 * 1024 * 1024:  # 10MB limit
-                    logger.info(f"Skipping large file: {file_name}")
-                    return None
-                
-                doc = load_file(temp_file_path)
-                if doc and doc.get('content'):
-                    doc["metadata"].update({
-                        "record_id": record_id,
-                        "file_name": file_name,
-                        "file_type": file_type
-                    })
-                    # Cache the processed document
-                    cache_manager.set_cached(cache_key, doc)
-                    logger.info(f"Successfully processed and cached: {file_name}")
-                    return doc
-                    
             except Exception as e:
-                logger.error(f"Error downloading {file_name}: {str(e)}")
+                print(f"Error downloading {file_name}: {str(e)}")
                 return None
             
+            # Skip large files
+            if os.path.getsize(temp_file_path) > 10 * 1024 * 1024:  # 10MB limit
+                print(f"Skipping large file: {file_name}")
+                return None
+            
+            doc = load_file(temp_file_path)
+            if doc and doc.get('content'):
+                doc["metadata"].update({
+                    "record_id": record_id,
+                    "file_name": file_name,
+                    "file_type": file_type
+                })
+                print(f"Successfully loaded: {file_name}")
+                return doc
+            
     except Exception as e:
-        logger.error(f"Error processing file {file_name}: {str(e)}")
+        print(f"Error processing file {file_name}: {str(e)}")
     return None
 
 async def process_all_records_and_files(user_token, progress=gr.Progress()):
-    """Process all records and files with improved debugging."""
+    """Process all records and files with improved feedback."""
     try:
-        logger.info("Starting record processing")
         manager = KadiManager(instance=instance, host=host, pat=user_token)
         all_records = get_all_records(user_token)
         
         if not all_records:
-            logger.warning("No records found")
             return 0
             
         documents = []
         total_records = len(all_records)
-        logger.info(f"Found {total_records} records to process")
         progress(0, desc=f"Found {total_records} records to process")
         
         for i, record_id in enumerate(all_records):
             try:
-                logger.info(f"Processing record {record_id} ({i+1}/{total_records})")
                 record = manager.record(identifier=record_id)
                 file_list = record.get_filelist().json()["items"]
                 
+                # Process files sequentially for better control and feedback
                 for file_info in file_list:
-                    logger.info(f"Processing file {file_info['name']}")
                     doc = process_file(manager, record_id, file_info)
                     if doc:
                         documents.append(doc)
-                        logger.info(f"Successfully processed {file_info['name']}")
-                    
+                        
                 progress((i + 1) / total_records, 
                         desc=f"Processed {i+1}/{total_records} records")
                         
             except Exception as e:
-                logger.error(f"Error processing record {record_id}: {str(e)}")
+                print(f"Error processing record {record_id}: {str(e)}")
                 continue
         
         if documents:
-            logger.info(f"Building vector store for {len(documents)} documents")
+            print(f"Building vector store for {len(documents)} documents...")
             rag = SimpleRAG()
             rag.documents = documents
             success = rag.build_vector_db()
             
             if success:
-                logger.info("Vector store built successfully!")
+                print("Vector store built successfully!")
                 return len(documents)
         
         return 0
         
     except Exception as e:
-        logger.error(f"Error in process_all_records_and_files: {str(e)}")
+        print(f"Error in process_all_records_and_files: {str(e)}")
         return 0
 
 def greet(request: gr.Request):
@@ -903,83 +880,110 @@ app = gr.mount_gradio_app(app, login_demo, path="/main")
 # Gradio interface
 with gr.Blocks() as main_demo:
     # State variables
+    _state_user_token = gr.State([])
+    user_session_rag = gr.State(SimpleRAG())
     loading_state = gr.State(True)  # Track loading state
-    initialization_complete = gr.State(False)  # Track initialization
-    system_ready = gr.State(False)  # Track if system is ready for chat
+
+    # Header with welcome message and logout button
+    with gr.Row():
+        with gr.Column(scale=7):
+            welcome_msg = gr.Markdown("Welcome to Chatbot!")
+            main_demo.load(greet, None, welcome_msg)
+        with gr.Column(scale=1):
+            gr.Button("Logout", link="/logout")
+
+    loading_status = gr.Markdown("Initializing system and loading records...")
+    loading_state = gr.State(True)  # Start as True (loading)
 
     async def initialize_system(request: gr.Request):
-        """Initialize system with proper state management"""
         try:
             user_token = request.request.session["user_access_token"]
-            logger.info("Starting system initialization")
-            
             num_docs = await process_all_records_and_files(user_token)
-            
             if num_docs > 0:
-                # Update states
-                loading_state.value = False
-                initialization_complete.value = True
-                system_ready.value = True
-                
-                logger.info("System initialization complete")
                 return f"Ready to chat! Loaded {num_docs} documents from your records."
             else:
-                loading_state.value = False
-                initialization_complete.value = True
-                system_ready.value = False
-                
-                logger.warning("No documents were loaded")
                 return "No documents were loaded. Please check your records and file permissions."
-                
         except Exception as e:
-            loading_state.value = False
-            initialization_complete.value = True
-            system_ready.value = False
-            
-            logger.error(f"Initialization error: {str(e)}")
             return f"Error loading records: {str(e)}"
 
-    # Update chat interface to respect system state
+    # Update loading status when initialization completes
+    main_demo.load(
+        fn=initialize_system,
+        inputs=None,
+        outputs=loading_status,
+    )
+
+    # Main chat interface
     with gr.Tab("Chat"):
         with gr.Row():
-            chatbot = gr.Chatbot(height=600)
-            system_status = gr.Markdown("System Status: Initializing...")
+            # Chat display
+            with gr.Column(scale=7):
+                chatbot = gr.Chatbot(height=600)
+                
+            # System status (optional)
+            with gr.Column(scale=3):
+                system_status = gr.Markdown("System Status: Initializing...")
 
+        # Input area
         with gr.Row():
             txt_input = gr.Textbox(
                 show_label=False,
                 placeholder="Type your question here...",
                 lines=2,
-                scale=8,
-                interactive=False  # Start as disabled
+                scale=8
             )
+            
+        # Buttons
+        with gr.Row():
+            submit_btn = gr.Button("Submit", scale=2)
+            refresh_btn = gr.Button("Clear Chat", scale=1, variant="secondary")
 
-        def update_ui_state(init_complete, sys_ready):
-            """Update UI elements based on system state"""
-            txt_input.interactive = sys_ready
-            status = "Ready" if sys_ready else "Not Ready"
-            if not init_complete:
-                status = "Initializing..."
-            return f"System Status: {status}"
-
-        # Update UI state when initialization completes
-        initialization_complete.change(
-            fn=update_ui_state,
-            inputs=[initialization_complete, system_ready],
-            outputs=[system_status]
+        # Example questions
+        gr.Examples(
+            examples=[
+                ["Summarize the contents of my records."],
+                ["What are the main topics discussed in my documents?"],
+                ["Find documents related to material science."],
+                ["How many records do I have in total?"],
+            ],
+            inputs=[txt_input]
         )
 
-        # Modified chat response function
-        def chat_response(message, history, sys_ready):
-            if not sys_ready:
-                return history + [(message, "System is not ready. Please wait for initialization to complete.")], ""
-            return respond(message, history)
+        # Define chat functionality
+        def chat_response(message, history, loading_state):
+            if loading_state:
+                return history + [(message, "Still loading documents. Please wait...")], ""
+            return respond(message, history, user_session_rag)
 
-        # Connect chat inputs with state checks
+        # Button actions
         txt_input.submit(
             fn=chat_response,
-            inputs=[txt_input, chatbot, system_ready],
+            inputs=[txt_input, chatbot, loading_state],
             outputs=[chatbot, txt_input]
+        )
+        
+        submit_btn.click(
+            fn=chat_response,
+            inputs=[txt_input, chatbot, loading_state],
+            outputs=[chatbot, txt_input]
+        )
+        
+        refresh_btn.click(
+            fn=lambda: ([], ""),
+            outputs=[chatbot, txt_input]
+        )
+
+        # Update system status periodically
+        def update_status(loading_state):
+            if loading_state:
+                return "System Status: Loading documents..."
+            return "System Status: Ready"
+
+        main_demo.load(
+            fn=update_status,
+            inputs=[loading_state],
+            outputs=[system_status],
+            every=1
         )
 
 app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
