@@ -91,7 +91,7 @@ from huggingface_hub import InferenceClient
 
 
 client = InferenceClient(
-    model="mistralai/Mistral-7B-Instruct-v0.2",
+    model="meta-llama/Meta-Llama-3-8B-Instruct",
     token=huggingfacehub_api_token
 )
 
@@ -107,7 +107,7 @@ embeddings_model = SentenceTransformer(
 
 class DocumentProcessor:
     def __init__(self):
-        self.tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.2")
+        self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
         nltk.download('punkt', quiet=True)
     
     def preprocess_document(self, text: str) -> str:
