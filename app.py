@@ -45,12 +45,19 @@ from typing import List, Tuple
 import re
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+import logging
+import asyncio
+from functools import timeout
 
 import nltk
 nltk.download(['punkt', 'punkt_tab', 'averaged_perceptron_tagger'])
 
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
+
+# Configure logging at the top of app.py
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 # Kadi OAuth settings
 load_dotenv()
@@ -445,7 +452,7 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
             print(f"Building vector store for {len(documents)} documents...")
             rag = SimpleRAG()
             rag.documents = documents
-            success = rag.build_vector_db()
+            success = await rag.create_vector_db()
             
             if success:
                 print("Vector store built successfully!")
@@ -603,9 +610,11 @@ class SimpleRAG:
         self.vector_store = None
         self.documents = []
 
-    def build_vector_db(self):
+    async def create_vector_db(self):
         """Initialize the vector database with proper progress updates."""
+        logger.debug("Starting vectorDB creation with timeout...")
         try:
+            logger.debug("Starting async vectorDB creation...")
             if not self.documents:
                 return False
             
@@ -642,6 +651,7 @@ class SimpleRAG:
             )
             
             print("Vector store created successfully!")
+            logger.debug("Async operation completed")
             return True
             
         except Exception as e:
@@ -745,11 +755,9 @@ class SimpleRAG:
             print(f"Error getting context: {str(e)}")
             return ""
     
-def is_initialized(self) -> bool:
+    def is_initialized(self) -> bool:
         """Check if the RAG system is properly initialized."""
         return self.vector_store is not None and len(self.documents) > 0
-
-
 
 
 def load_pdf(file_path):
@@ -759,7 +767,7 @@ def load_pdf(file_path):
     return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "pdf"}}
 
 
-def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
+async def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
     """Prepare files for chat with proper progress updates."""
     if not file_names:
         raise gr.Error("No file selected")
@@ -797,7 +805,7 @@ def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
     progress(0.8, desc="Building vector store...")
     rag = SimpleRAG()
     rag.documents = documents
-    success = rag.build_vector_db()
+    success = await rag.create_vector_db()
     
     if not success:
         raise gr.Error("Failed to build vector store")
@@ -883,6 +891,8 @@ with gr.Blocks() as main_demo:
     _state_user_token = gr.State([])
     user_session_rag = gr.State(SimpleRAG())
     loading_state = gr.State(True)  # Track loading state
+    is_processing = False
+    current_step = ""
 
     # Header with welcome message and logout button
     with gr.Row():
