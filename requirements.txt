@@ -21,3 +21,7 @@ pymupdf
 chromadb
 nltk
 transformers
+async-timeout
+aiohttp
+python-multipart
+python-jose
