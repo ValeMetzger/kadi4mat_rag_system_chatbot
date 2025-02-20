@@ -20,23 +20,20 @@ import json
 import uvicorn
 import gradio as gr
 import kadi_apy
-import pymupdf
 import numpy as np
 import faiss
 import os
 import tempfile
-import pymupdf
+from requests.compat import urljoin
 from fastapi import FastAPI, Depends
 from starlette.responses import RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 from authlib.integrations.starlette_client import OAuth, OAuthError
 from fastapi import Request
 from kadi_apy import KadiManager
-from requests.compat import urljoin
 from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
-import mimetypes
 from pathlib import Path
 from PyPDF2 import PdfReader
 from docx import Document as DocxReader
@@ -218,21 +215,17 @@ class DocumentProcessor:
 # Dependency to get the current user
 def get_user(request: Request):
     """Validate and get user information."""
-
-    if "user_access_token" in request.session:
-        token = request.session["user_access_token"]
-    else:
-        token = None
+    token = request.session.get("user_access_token")
+    if not token:
         return None
-    if token:
-        try:
-            manager = KadiManager(instance=instance, host=host, pat=token)
-            user = manager.pat_user
-            return user.meta["displayname"]
-        except kadi_apy.lib.exceptions.KadiAPYRequestError as e:
-            print(e)
-            return None
-    return None  # "Authed but Failed at getting user info!"
+        
+    try:
+        manager = KadiManager(instance=instance, host=host, pat=token)
+        user = manager.pat_user
+        return user.meta["displayname"]
+    except Exception as e:
+        print(f"Error getting user info: {e}")
+        return None
 
 
 @app.get("/")
@@ -336,32 +329,22 @@ def load_csv(file_path):
     return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "csv"}}
 
 def load_file(file_path):
-    """Unified loader for different file types with enhanced error handling."""
+    """Unified loader for different file types."""
     try:
         file_type = detect_file_type(file_path)
-        doc = None
+        loaders = {
+            "pdf": load_pdf,
+            "docx": load_docx,
+            "excel": load_excel,
+            "txt": load_text,
+            "md": load_markdown,
+            "csv": load_csv
+        }
         
-        if file_type == "pdf":
-            doc = load_pdf(file_path)
-        elif file_type == "docx":
-            doc = load_docx(file_path)
-        elif file_type == "excel":
-            doc = load_excel(file_path)
-        elif file_type == "txt":  # This handles .txt, .py, and .flow files
-            doc = load_text(file_path)
-        elif file_type == "md":
-            doc = load_markdown(file_path)
-        elif file_type == "csv":
-            doc = load_csv(file_path)
+        if file_type not in loaders:
+            raise ValueError(f"Unsupported file type: {file_path}")
             
-        # Validate document structure
-        if doc and isinstance(doc, dict):
-            if not isinstance(doc.get('content', ''), str):
-                doc['content'] = str(doc['content'])
-            if not doc.get('metadata'):
-                doc['metadata'] = {}
-            return doc
-        return None
+        return loaders[file_type](file_path)
         
     except Exception as e:
         print(f"Error in load_file for {file_path}: {str(e)}")
@@ -369,21 +352,21 @@ def load_file(file_path):
 
 def detect_file_type(file_path):
     """Enhanced file type detection."""
-    mime_type, _ = mimetypes.guess_type(file_path)
+    # Simplify to just use Path.suffix
     ext = Path(file_path).suffix.lower()
     
-    # Extended file type mapping
-    if mime_type == "application/pdf" or ext == ".pdf":
+    # Simple mapping without mimetypes
+    if ext == ".pdf":
         return "pdf"
-    elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or ext == ".docx":
+    elif ext == ".docx":
         return "docx"
-    elif mime_type in ["application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] or ext in [".xls", ".xlsx"]:
+    elif ext in [".xls", ".xlsx"]:
         return "excel"
-    elif mime_type == "text/plain" or ext in [".txt", ".py", ".flow"]:  # Added support for Python and flow files
+    elif ext in [".txt", ".py", ".flow"]:
         return "txt"
-    elif mime_type == "text/markdown" or ext == ".md":
+    elif ext == ".md":
         return "md"
-    elif mime_type == "text/csv" or ext == ".csv":
+    elif ext == ".csv":
         return "csv"
     else:
         raise ValueError(f"Unsupported file type: {file_path}")
@@ -392,14 +375,17 @@ def process_file(manager, record_id, file_info):
     """Process a single file with improved error handling and timeout."""
     try:
         file_name = file_info["name"]
-        file_id = manager.get_file_id(file_name)
+        
+        # Get record object first
+        record = manager.record(identifier=record_id)
+        file_id = record.get_file_id(file_name)  # Get file ID from record object
         
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_file_path = os.path.join(temp_dir, file_name)
             
             # Add timeout for file download
             try:
-                manager.download_file(file_id, temp_file_path)
+                record.download_file(file_id, temp_file_path)  # Use record to download
             except Exception as e:
                 print(f"Timeout downloading {file_name}: {str(e)}")
                 return None
@@ -420,6 +406,8 @@ def process_file(manager, record_id, file_info):
                 return doc
     except Exception as e:
         print(f"Error processing file {file_name}: {str(e)}")
+        import traceback
+        traceback.print_exc()  # This will help debug any other issues
     return None
 
 async def process_all_records_and_files(user_token, progress=gr.Progress()):
@@ -437,7 +425,7 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
         progress(0, desc=f"Found {total_records} records to process")
         
         # Process records in parallel with a larger thread pool
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ThreadPoolExecutor(max_workers=4) as executor:  # Reduced workers to prevent overload
             # Process records in batches to avoid memory issues
             batch_size = 5
             for i in range(0, len(all_records), batch_size):
@@ -475,16 +463,8 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
             rag = SimpleRAG()
             rag.documents = documents
             
-            # Check cache first
-            cache_key = cache_manager.get_cache_key(str(documents))
-            if cache_manager.get_cached(cache_key):
-                print("Using cached vector store")
-                success = rag.build_vector_db()
-                if success:
-                    return len(documents)
-            
-            # If not cached, build vector store with progress updates
-            print("Building new vector store...")
+            # Build vector store with progress updates
+            print("Building vector store...")
             success = rag.build_vector_db()
             if success:
                 return len(documents)
@@ -497,6 +477,8 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
             
     except Exception as e:
         print(f"Error in process_all_records_and_files: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return 0
 
 def greet(request: gr.Request):
@@ -797,50 +779,6 @@ def is_initialized(self) -> bool:
         return self.vector_store is not None and len(self.documents) > 0
 
 
-
-
-def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
-    """Chunk text into pieces of specified size with overlap, considering separators."""
-
-    # Split the text by the separators
-    for sep in separators:
-        text = text.replace(sep, "\n")
-
-    chunks = []
-    start = 0
-
-    while start < len(text):
-        # Determine the end of the chunk, accounting for overlap and the chunk size
-        end = min(len(text), start + chunk_size)
-
-        # Find a natural break point at the newline to avoid cutting words
-        if end < len(text):
-            while end > start and text[end] != "\n":
-                end -= 1
-
-        chunk = text[start:end].strip()  # Strip trailing whitespace
-        chunks.append(chunk)
-
-        # Move the start position forward by the overlap size
-        start += chunk_size - overlap_size
-
-    return chunks
-
-
-def load_and_chunk_pdf(file_path):
-    """Extracts text from a PDF file and stores it in the property documents by chunks."""
-
-    with pymupdf.open(file_path) as pdf:
-        text = ""
-        for page in pdf:
-            text += page.get_text()
-
-        chunks = chunk_text(text)
-        documents = []
-        for chunk in chunks:
-            documents.append({"content": chunk, "metadata": pdf.metadata})
-
-        return documents
 
 
 def load_pdf(file_path):
