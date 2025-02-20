@@ -472,6 +472,39 @@ class SimpleRAG:
         self.vector_store = None
         self.documents = []
         
+    def build_vector_db(self):
+        """Initialize or rebuild the vector database with current documents."""
+        try:
+            processed_chunks = []
+            for doc in self.documents:
+                # Preprocess and chunk the document content
+                clean_text = self.document_processor.preprocess_document(doc['content'])
+                chunks = self.document_processor.chunk_document(clean_text)
+                processed_chunks.extend(chunks)
+            
+            # Initialize vector store
+            self.vector_store = Chroma(
+                collection_name="documents",
+                embedding_function=self.embeddings
+            )
+            
+            # Add documents with metadata
+            self.vector_store.add_texts(
+                texts=processed_chunks,
+                metadatas=[{
+                    "chunk_id": i,
+                    "doc_id": f"doc_{i//5}",  # Assuming ~5 chunks per doc
+                    "source": doc.get('source', 'unknown'),
+                    "file_type": doc.get('metadata', {}).get('file_type', 'unknown')
+                } for i, doc in enumerate(self.documents)]
+            )
+            
+            return len(processed_chunks)
+            
+        except Exception as e:
+            print(f"Error building vector database: {str(e)}")
+            raise
+
     def add_documents(self, documents: List[str]):
         """Process and add documents to the RAG system."""
         try:
