@@ -45,12 +45,20 @@ from typing import List, Tuple
 import re
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+import logging
 
 import nltk
 nltk.download(['punkt', 'punkt_tab', 'averaged_perceptron_tagger'])
 
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Kadi OAuth settings
 load_dotenv()
@@ -369,14 +377,21 @@ def detect_file_type(file_path):
     return ALLOWED_EXTENSIONS.get(ext, None)
     
 def process_file(manager, record_id, file_info):
-    """Process a single file with improved filtering."""
+    """Process a single file with improved filtering and caching."""
     try:
         file_name = file_info["name"]
         
-        # Check if file type is supported before processing
+        # Use cache if available
+        cache_key = f"{record_id}_{file_name}"
+        cached_doc = cache_manager.get_cached(cache_key)
+        if cached_doc:
+            logger.info(f"Using cached version of {file_name}")
+            return cached_doc
+        
+        # Check file type and size early
         file_type = detect_file_type(Path(file_name))
         if not file_type:
-            print(f"Skipping unsupported file type: {file_name}")
+            logger.info(f"Skipping unsupported file type: {file_name}")
             return None
         
         record = manager.record(identifier=record_id)
@@ -387,74 +402,82 @@ def process_file(manager, record_id, file_info):
             
             try:
                 record.download_file(file_id, temp_file_path)
+                
+                # Skip large files early
+                if os.path.getsize(temp_file_path) > 10 * 1024 * 1024:  # 10MB limit
+                    logger.info(f"Skipping large file: {file_name}")
+                    return None
+                
+                doc = load_file(temp_file_path)
+                if doc and doc.get('content'):
+                    doc["metadata"].update({
+                        "record_id": record_id,
+                        "file_name": file_name,
+                        "file_type": file_type
+                    })
+                    # Cache the processed document
+                    cache_manager.set_cached(cache_key, doc)
+                    logger.info(f"Successfully processed and cached: {file_name}")
+                    return doc
+                    
             except Exception as e:
-                print(f"Error downloading {file_name}: {str(e)}")
+                logger.error(f"Error downloading {file_name}: {str(e)}")
                 return None
-            
-            # Skip large files
-            if os.path.getsize(temp_file_path) > 10 * 1024 * 1024:  # 10MB limit
-                print(f"Skipping large file: {file_name}")
-                return None
-            
-            doc = load_file(temp_file_path)
-            if doc and doc.get('content'):
-                doc["metadata"].update({
-                    "record_id": record_id,
-                    "file_name": file_name,
-                    "file_type": file_type
-                })
-                print(f"Successfully loaded: {file_name}")
-                return doc
             
     except Exception as e:
-        print(f"Error processing file {file_name}: {str(e)}")
+        logger.error(f"Error processing file {file_name}: {str(e)}")
     return None
 
 async def process_all_records_and_files(user_token, progress=gr.Progress()):
-    """Process all records and files with improved feedback."""
+    """Process all records and files with improved debugging."""
     try:
+        logger.info("Starting record processing")
         manager = KadiManager(instance=instance, host=host, pat=user_token)
         all_records = get_all_records(user_token)
         
         if not all_records:
+            logger.warning("No records found")
             return 0
             
         documents = []
         total_records = len(all_records)
+        logger.info(f"Found {total_records} records to process")
         progress(0, desc=f"Found {total_records} records to process")
         
         for i, record_id in enumerate(all_records):
             try:
+                logger.info(f"Processing record {record_id} ({i+1}/{total_records})")
                 record = manager.record(identifier=record_id)
                 file_list = record.get_filelist().json()["items"]
                 
-                # Process files sequentially for better control and feedback
                 for file_info in file_list:
+                    logger.info(f"Processing file {file_info['name']}")
                     doc = process_file(manager, record_id, file_info)
                     if doc:
                         documents.append(doc)
-                        
+                        logger.info(f"Successfully processed {file_info['name']}")
+                    
                 progress((i + 1) / total_records, 
                         desc=f"Processed {i+1}/{total_records} records")
                         
             except Exception as e:
-                print(f"Error processing record {record_id}: {str(e)}")
+                logger.error(f"Error processing record {record_id}: {str(e)}")
                 continue
         
         if documents:
-            print(f"Building vector store for {len(documents)} documents...")
+            logger.info(f"Building vector store for {len(documents)} documents")
             rag = SimpleRAG()
             rag.documents = documents
             success = rag.build_vector_db()
             
             if success:
-                print("Vector store built successfully!")
+                logger.info("Vector store built successfully!")
                 return len(documents)
         
         return 0
         
     except Exception as e:
-        print(f"Error in process_all_records_and_files: {str(e)}")
+        logger.error(f"Error in process_all_records_and_files: {str(e)}")
         return 0
 
 def greet(request: gr.Request):
@@ -604,7 +627,7 @@ class SimpleRAG:
         self.documents = []
 
     def build_vector_db(self):
-        """Initialize the vector database with improved feedback."""
+        """Initialize the vector database with proper progress updates."""
         try:
             if not self.documents:
                 return False
@@ -760,6 +783,7 @@ def load_pdf(file_path):
 
 
 def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
+    """Prepare files for chat with proper progress updates."""
     if not file_names:
         raise gr.Error("No file selected")
     
@@ -770,24 +794,38 @@ def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
     progress(0.2, desc="Loading files...")
     documents = []
     
-    for file_name in file_names:
+    total_files = len(file_names)
+    for idx, file_name in enumerate(file_names):
         try:
             file_id = record.get_file_id(file_name)
             with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-                temp_file_location = os.path.join(temp_dir, file_name)
-                record.download_file(file_id, temp_file_location)
-                doc = load_file(temp_file_location)
-                documents.append(doc)
+                temp_file_path = os.path.join(temp_dir, file_name)
+                record.download_file(file_id, temp_file_path)
+                
+                # Only process supported file types
+                if detect_file_type(Path(temp_file_path)):
+                    doc = load_file(temp_file_path)
+                    if doc:
+                        documents.append(doc)
+                        progress((idx + 1) / total_files, 
+                               desc=f"Loaded {idx+1}/{total_files} files")
+                
         except Exception as e:
             print(f"Error processing file {file_name}: {str(e)}")
+            continue
 
-    # Create and initialize RAG system
+    if not documents:
+        raise gr.Error("No valid documents were loaded")
+
+    progress(0.8, desc="Building vector store...")
     rag = SimpleRAG()
     rag.documents = documents
-    rag.embeddings_model = embeddings_model
-    rag.build_vector_db()
+    success = rag.build_vector_db()
     
-    progress(1, desc="Ready to chat")
+    if not success:
+        raise gr.Error("Failed to build vector store")
+    
+    progress(1.0, desc="Ready to chat!")
     return "Ready to chat", rag
 
 
