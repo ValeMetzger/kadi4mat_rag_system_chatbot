@@ -506,7 +506,7 @@ class SimpleRAG:
                 print("Warning: Vector store not initialized")
                 return []
             
-            print(f"Searching for: {query}")
+            print(f"\nSearching for query: {query}")
             
             # Search with scores
             results = self.vector_store.similarity_search_with_score(
@@ -516,24 +516,32 @@ class SimpleRAG:
             
             print(f"Found {len(results)} results")
             
-            # Process results - use a more lenient threshold
             filtered_results = []
             seen_doc_ids = set()
             
-            for doc, score in results:
-                print(f"Score: {score}, Content: {doc.page_content[:100]}...")
-                # Adjust threshold to be more lenient (higher number means more results)
-                if score < 2.0:  # Changed from 1.5 to 2.0
+            for idx, (doc, score) in enumerate(results):
+                print(f"\nResult {idx}:")
+                print(f"Score: {score}")
+                print(f"Content preview: {doc.page_content[:200]}...")
+                print(f"Metadata: {doc.metadata}")
+                
+                # Adjust threshold to be more lenient
+                if score < 2.0:
                     doc_id = doc.metadata.get('doc_id')
-                    if doc_id not in seen_doc_ids:  # Avoid duplicate docs
+                    if doc_id not in seen_doc_ids:
                         filtered_results.append(doc.page_content)
                         seen_doc_ids.add(doc_id)
+                        print(f"Added to filtered results (doc_id: {doc_id})")
+                else:
+                    print("Skipped due to score threshold")
             
-            print(f"Returning {len(filtered_results)} filtered results")
+            print(f"\nReturning {len(filtered_results)} filtered results")
             return filtered_results
             
         except Exception as e:
             print(f"Error searching documents: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
             return []
 
     def get_context_for_query(self, query: str) -> str:
@@ -559,18 +567,26 @@ class SimpleRAG:
     def build_vector_db(self):
         """Initialize or rebuild the vector database with current documents."""
         try:
-            from langchain_community.vectorstores import Chroma  # Updated import
+            from langchain_community.vectorstores import Chroma
+            
+            print("\nStarting vector database build...")
+            print(f"Number of documents to process: {len(self.documents)}")
+            
+            # Debug document contents
+            for idx, doc in enumerate(self.documents):
+                print(f"\nDocument {idx}:")
+                print(f"Source: {doc.get('source', 'unknown')}")
+                print(f"Content length: {len(doc.get('content', ''))}")
+                print(f"Content preview: {doc.get('content', '')[:200]}...")
             
             processed_chunks = []
             chunk_metadata = []
             
-            # Process each document and keep track of metadata
             for doc_idx, doc in enumerate(self.documents):
-                # Preprocess and chunk the document content
                 clean_text = self.document_processor.preprocess_document(doc['content'])
                 chunks = self.document_processor.chunk_document(clean_text)
+                print(f"\nDocument {doc_idx} produced {len(chunks)} chunks")
                 
-                # Add metadata for each chunk from this document
                 for chunk_idx, chunk in enumerate(chunks):
                     processed_chunks.append(chunk)
                     chunk_metadata.append({
@@ -580,13 +596,15 @@ class SimpleRAG:
                         "file_type": doc.get('metadata', {}).get('file_type', 'unknown')
                     })
             
-            print(f"Created {len(processed_chunks)} chunks from {len(self.documents)} documents")
+            print(f"\nTotal chunks created: {len(processed_chunks)}")
+            if processed_chunks:
+                print(f"First chunk preview: {processed_chunks[0][:200]}...")
             
             if not processed_chunks:
                 print("Warning: No chunks were created from the documents")
                 return 0
             
-            # Initialize vector store with updated import
+            # Initialize vector store
             self.vector_store = Chroma(
                 collection_name="documents",
                 embedding_function=self.embeddings
@@ -598,11 +616,13 @@ class SimpleRAG:
                 metadatas=chunk_metadata
             )
             
-            print(f"Successfully added {len(processed_chunks)} chunks to vector store")
+            print(f"\nSuccessfully built vector database with {len(processed_chunks)} chunks")
             return len(processed_chunks)
             
         except Exception as e:
             print(f"Error building vector database: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
             raise
 
     def add_documents(self, documents: List[str]):
