@@ -91,7 +91,7 @@ from huggingface_hub import InferenceClient
 
 
 client = InferenceClient(
-    model="meta-llama/Meta-Llama-3-8B-Instruct",
+    model="mistralai/Mistral-7B-Instruct-v0.2",
     token=huggingfacehub_api_token
 )
 
@@ -107,7 +107,7 @@ embeddings_model = SentenceTransformer(
 
 class DocumentProcessor:
     def __init__(self):
-        self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
+        self.tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.2")
         nltk.download('punkt', quiet=True)
     
     def preprocess_document(self, text: str) -> str:
@@ -211,38 +211,6 @@ async def auth(request: Request):
         print("Error getting access token", e)
         return RedirectResponse(url="/")
 
-class DocumentProcessor:
-    def __init__(self):
-        self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-        nltk.download('punkt', quiet=True)
-        # Add maximum chunk length
-        self.max_chunk_length = 500
-    
-    def chunk_document(self, text: str) -> List[str]:
-        """Split document into semantic chunks with improved handling."""
-        sentences = nltk.sent_tokenize(text)
-        chunks = []
-        current_chunk = []
-        current_length = 0
-        
-        for sentence in sentences:
-            # More efficient tokenization
-            tokens = self.tokenizer(sentence, truncation=True, max_length=self.max_chunk_length)
-            sentence_length = len(tokens['input_ids'])
-            
-            if current_length + sentence_length > self.max_chunk_length:
-                if current_chunk:
-                    chunks.append(' '.join(current_chunk))
-                current_chunk = [sentence]
-                current_length = sentence_length
-            else:
-                current_chunk.append(sentence)
-                current_length += sentence_length
-        
-        if current_chunk:
-            chunks.append(' '.join(current_chunk))
-        
-        return chunks
 
 def load_pdf(file_path):
     """Extract text from a PDF file."""
