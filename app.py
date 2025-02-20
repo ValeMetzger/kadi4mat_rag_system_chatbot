@@ -20,20 +20,23 @@ import json
 import uvicorn
 import gradio as gr
 import kadi_apy
+import pymupdf
 import numpy as np
 import faiss
 import os
 import tempfile
-from requests.compat import urljoin
+import pymupdf
 from fastapi import FastAPI, Depends
 from starlette.responses import RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 from authlib.integrations.starlette_client import OAuth, OAuthError
 from fastapi import Request
 from kadi_apy import KadiManager
+from requests.compat import urljoin
 from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
+import mimetypes
 from pathlib import Path
 from PyPDF2 import PdfReader
 from docx import Document as DocxReader
@@ -43,20 +46,7 @@ from transformers import AutoTokenizer
 from huggingface_hub import InferenceClient
 from typing import List, Tuple
 import re
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial, lru_cache
-import logging
-import asyncio
-
 import nltk
-nltk.download(['punkt', 'punkt_tab', 'averaged_perceptron_tagger'])
-
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
-
-# Configure logging at the top of app.py
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
 
 # Kadi OAuth settings
 load_dotenv()
@@ -99,7 +89,7 @@ from huggingface_hub import InferenceClient
 
 
 client = InferenceClient(
-    model="meta-llama/Llama-3.1-8B",
+    model="meta-llama/Meta-Llama-3-8B-Instruct",
     token=huggingfacehub_api_token
 )
 
@@ -113,128 +103,60 @@ embeddings_model = SentenceTransformer(
 )
 
 
-import hashlib
-import pickle
-from pathlib import Path
-
-class CacheManager:
-    def __init__(self, cache_dir=".cache"):
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(exist_ok=True)
-    
-    def get_cache_key(self, data):
-        """Generate a cache key from the data."""
-        return hashlib.md5(str(data).encode()).hexdigest()
-    
-    def get_cached(self, key):
-        """Get data from cache."""
-        cache_file = self.cache_dir / f"{key}.pkl"
-        if cache_file.exists():
-            with open(cache_file, 'rb') as f:
-                return pickle.load(f)
-        return None
-    
-    def set_cached(self, key, data):
-        """Save data to cache."""
-        cache_file = self.cache_dir / f"{key}.pkl"
-        with open(cache_file, 'wb') as f:
-            pickle.dump(data, f)
-
-# Initialize cache manager
-cache_manager = CacheManager()
-
 class DocumentProcessor:
-    """Handles document chunking and preprocessing."""
     def __init__(self):
-        self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
+        self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
         nltk.download('punkt', quiet=True)
-        self.max_chunk_length = 512
-        self.overlap = 50
     
     def preprocess_document(self, text: str) -> str:
         """Clean and preprocess document text."""
-        if not isinstance(text, str):
-            return ""
         # Remove special characters and normalize whitespace
         text = re.sub(r'[^\w\s.,!?-]', ' ', text)
         text = ' '.join(text.split())
         return text
     
-    def chunk_document(self, text: str) -> List[str]:
-        """Split document into semantic chunks with improved handling."""
-        if not text:
-            return []
-            
-        try:
-            # First preprocess the text
-            text = self.preprocess_document(text)
-            sentences = nltk.sent_tokenize(text)
-            chunks = []
-            current_chunk = []
-            current_length = 0
-            
-            for sentence in sentences:
-                # Truncate long sentences
-                tokens = self.tokenizer.encode(sentence, truncation=True, 
-                                            max_length=self.max_chunk_length)
-                sentence_length = len(tokens)
-                
-                if sentence_length > self.max_chunk_length:
-                    # Split very long sentences
-                    words = sentence.split()
-                    temp_chunk = []
-                    temp_length = 0
-                    
-                    for word in words:
-                        word_tokens = self.tokenizer.encode(word + ' ')
-                        if temp_length + len(word_tokens) > self.max_chunk_length:
-                            if temp_chunk:
-                                chunks.append(' '.join(temp_chunk))
-                            temp_chunk = [word]
-                            temp_length = len(word_tokens)
-                        else:
-                            temp_chunk.append(word)
-                            temp_length += len(word_tokens)
-                    
-                    if temp_chunk:
-                        chunks.append(' '.join(temp_chunk))
-                    continue
-                
-                if current_length + sentence_length > self.max_chunk_length:
-                    if current_chunk:
-                        chunks.append(' '.join(current_chunk))
-                    current_chunk = [sentence]
-                    current_length = sentence_length
-                else:
-                    current_chunk.append(sentence)
-                    current_length += sentence_length
-            
-            if current_chunk:
-                chunks.append(' '.join(current_chunk))
-            
-            return chunks
-            
-        except Exception as e:
-            print(f"Error in chunk_document: {str(e)}")
-            return [text[:self.max_chunk_length]] if text else []
+    def chunk_document(self, text: str, max_chunk_size: int = 500) -> List[str]:
+        """Split document into semantic chunks."""
+        sentences = nltk.sent_tokenize(text)
+        chunks = []
+        current_chunk = []
+        current_length = 0
+        
+        for sentence in sentences:
+            sentence_tokens = self.tokenizer(sentence, return_length=True)
+            if current_length + sentence_tokens['length'] > max_chunk_size:
+                if current_chunk:
+                    chunks.append(' '.join(current_chunk))
+                current_chunk = [sentence]
+                current_length = sentence_tokens['length']
+            else:
+                current_chunk.append(sentence)
+                current_length += sentence_tokens['length']
+        
+        if current_chunk:
+            chunks.append(' '.join(current_chunk))
+        
+        return chunks
 
-@lru_cache(maxsize=1000)
-def get_cached_user(token: str):
-    """Cached version of user validation."""
-    try:
-        manager = KadiManager(instance=instance, host=host, pat=token)
-        user = manager.pat_user
-        return user.meta["displayname"]
-    except Exception as e:
-        logger.error(f"Error getting user info: {e}")
-        return None
 
+# Dependency to get the current user
 def get_user(request: Request):
-    """Validate and get user information with caching."""
-    token = request.session.get("user_access_token")
-    if not token:
+    """Validate and get user information."""
+
+    if "user_access_token" in request.session:
+        token = request.session["user_access_token"]
+    else:
+        token = None
         return None
-    return get_cached_user(token)
+    if token:
+        try:
+            manager = KadiManager(instance=instance, host=host, pat=token)
+            user = manager.pat_user
+            return user.meta["displayname"]
+        except kadi_apy.lib.exceptions.KadiAPYRequestError as e:
+            print(e)
+            return None
+    return None  # "Authed but Failed at getting user info!"
 
 
 @app.get("/")
@@ -307,23 +229,10 @@ def load_excel(file_path):
     return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "excel"}}
 
 def load_text(file_path):
-    """Enhanced text file loading with encoding fallback."""
-    encodings = ['utf-8', 'latin-1', 'cp1252']
-    for encoding in encodings:
-        try:
-            with open(file_path, 'r', encoding=encoding) as f:
-                text = f.read()
-                if text.strip():  # Check if content is not empty
-                    return {
-                        "source": Path(file_path).name,
-                        "content": text,
-                        "metadata": {
-                            "file_type": "txt" if not file_path.endswith('.py') else "python"
-                        }
-                    }
-        except UnicodeDecodeError:
-            continue
-    return None
+    """Read plain text from a TXT file."""
+    with open(file_path, 'r', encoding='utf-8') as f:
+        text = f.read()
+    return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "txt"}}
 
 def load_markdown(file_path):
     """Convert Markdown content to plain text."""
@@ -339,132 +248,85 @@ def load_csv(file_path):
 
 def load_file(file_path):
     """Unified loader for different file types."""
-    try:
-        file_type = detect_file_type(file_path)
-        loaders = {
-            "pdf": load_pdf,
-            "docx": load_docx,
-            "excel": load_excel,
-            "txt": load_text,
-            "md": load_markdown,
-            "csv": load_csv
-        }
-        
-        if file_type not in loaders:
-            raise ValueError(f"Unsupported file type: {file_path}")
-            
-        return loaders[file_type](file_path)
-        
-    except Exception as e:
-        print(f"Error in load_file for {file_path}: {str(e)}")
-        return None
+    file_type = detect_file_type(file_path)
+    if file_type == "pdf":
+        return load_pdf(file_path)
+    elif file_type == "docx":
+        return load_docx(file_path)
+    elif file_type == "excel":
+        return load_excel(file_path)
+    elif file_type == "txt":
+        return load_text(file_path)
+    elif file_type == "md":
+        return load_markdown(file_path)
+    elif file_type == "csv":
+        return load_csv(file_path)
+    else:
+        raise ValueError(f"Unsupported file type: {file_path}")
 
 def detect_file_type(file_path):
-    """Enhanced file type detection with allowed types only."""
+    """Detect file type using mimetypes and file extension."""
+    mime_type, _ = mimetypes.guess_type(file_path)
     ext = Path(file_path).suffix.lower()
-    
-    # Define allowed file types
-    ALLOWED_EXTENSIONS = {
-        ".pdf": "pdf",
-        ".docx": "docx",
-        ".doc": "docx",
-        ".txt": "txt",
-        ".md": "md",
-        ".csv": "csv",
-        ".xlsx": "excel",
-        ".xls": "excel"
-    }
-    
-    return ALLOWED_EXTENSIONS.get(ext, None)
-    
-def process_file(manager, record_id, file_info):
-    """Process a single file with improved filtering."""
-    try:
-        file_name = file_info["name"]
-        
-        # Check if file type is supported before processing
-        file_type = detect_file_type(Path(file_name))
-        if not file_type:
-            print(f"Skipping unsupported file type: {file_name}")
-            return None
-        
-        record = manager.record(identifier=record_id)
-        file_id = record.get_file_id(file_name)
-        
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_file_path = os.path.join(temp_dir, file_name)
-            
-            try:
-                record.download_file(file_id, temp_file_path)
-            except Exception as e:
-                print(f"Error downloading {file_name}: {str(e)}")
-                return None
-            
-            # Skip large files
-            if os.path.getsize(temp_file_path) > 10 * 1024 * 1024:  # 10MB limit
-                print(f"Skipping large file: {file_name}")
-                return None
-            
-            doc = load_file(temp_file_path)
-            if doc and doc.get('content'):
-                doc["metadata"].update({
-                    "record_id": record_id,
-                    "file_name": file_name,
-                    "file_type": file_type
-                })
-                print(f"Successfully loaded: {file_name}")
-                return doc
-            
-    except Exception as e:
-        print(f"Error processing file {file_name}: {str(e)}")
-    return None
+    if mime_type == "application/pdf" or ext == ".pdf":
+        return "pdf"
+    elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or ext == ".docx":
+        return "docx"
+    elif mime_type in ["application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] or ext in [".xls", ".xlsx"]:
+        return "excel"
+    elif mime_type == "text/plain" or ext == ".txt":
+        return "txt"
+    elif mime_type == "text/markdown" or ext == ".md":
+        return "md"
+    elif mime_type == "text/csv" or ext == ".csv":
+        return "csv"
+    else:
+        raise ValueError(f"Unsupported file type: {file_path}")
 
 async def process_all_records_and_files(user_token, progress=gr.Progress()):
-    """Process all records and files with improved feedback."""
-    try:
-        manager = KadiManager(instance=instance, host=host, pat=user_token)
-        all_records = get_all_records(user_token)
-        
-        if not all_records:
-            return 0
+    """Process all records and files for the user."""
+    manager = KadiManager(instance=instance, host=host, pat=user_token)
+    all_records = get_all_records(user_token)
+
+    documents = []
+    total_records = len(all_records)
+    progress(0, desc=f"Found {total_records} records to process")
+
+    for i, record_id in enumerate(all_records):
+        try:
+            record = manager.record(identifier=record_id)
+            file_names = [info["name"] for info in record.get_filelist().json()["items"]]
             
-        documents = []
-        total_records = len(all_records)
-        progress(0, desc=f"Found {total_records} records to process")
-        
-        for i, record_id in enumerate(all_records):
-            try:
-                record = manager.record(identifier=record_id)
-                file_list = record.get_filelist().json()["items"]
-                
-                # Process files sequentially for better control and feedback
-                for file_info in file_list:
-                    doc = process_file(manager, record_id, file_info)
-                    if doc:
+            for file_name in file_names:
+                try:
+                    file_id = record.get_file_id(file_name)
+                    with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+                        temp_file_location = os.path.join(temp_dir, file_name)
+                        record.download_file(file_id, temp_file_location)
+                        doc = load_file(temp_file_location)
+                        # Add record metadata to the document
+                        doc["metadata"]["record_id"] = record_id
                         documents.append(doc)
-                        
-                progress((i + 1) / total_records, 
-                        desc=f"Processed {i+1}/{total_records} records")
-                        
-            except Exception as e:
-                print(f"Error processing record {record_id}: {str(e)}")
-                continue
-        
-        if documents:
-            print(f"Building vector store for {len(documents)} documents...")
-            rag = SimpleRAG()
-            rag.documents = documents
-            success = await rag.create_vector_db()
-            
-            if success:
-                print("Vector store built successfully!")
-                return len(documents)
-        
-        return 0
-        
-    except Exception as e:
-        print(f"Error in process_all_records_and_files: {str(e)}")
-        return 0
+                except Exception as e:
+                    print(f"Error processing file {file_name} in record {record_id}: {str(e)}")
+
+            progress((i + 1) / total_records, desc=f"Processing record {i + 1}/{total_records}")
+        except Exception as e:
+            print(f"Error processing record {record_id}: {str(e)}")
+            continue
+
+    # Initialize RAG system with all documents
+    rag = SimpleRAG()
+    rag.documents = documents
+    rag.embeddings_model = embeddings_model
+    print(f"Building vector database with {len(documents)} documents...")
+    rag.build_vector_db()
+    
+    # Update the global RAG system
+    global user_session_rag
+    user_session_rag = rag
+    
+    return len(documents)
 
 def greet(request: gr.Request):
     """Show greeting message."""
@@ -602,70 +464,12 @@ with gr.Blocks() as login_demo:
 
 # A simple RAG implementation
 class SimpleRAG:
-    """Retrieval Augmented Generation system for document Q&A."""
     def __init__(self):
         self.document_processor = DocumentProcessor()
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-mpnet-base-v2",
-            cache_folder=".cache/embeddings"
-        )
+        self.embeddings = HuggingFaceEmbeddings()
         self.vector_store = None
         self.documents = []
-
-    async def create_vector_db(self):
-        """Initialize the vector database with proper progress updates."""
-        try:
-            logger.debug("Starting vectorDB creation with timeout...")
-            async def _create_db():
-                logger.debug("Starting async vectorDB creation...")
-                if not self.documents:
-                    return False
-                
-                print(f"Processing {len(self.documents)} documents...")
-                processed_texts = []
-                metadatas = []
-                
-                for idx, doc in enumerate(self.documents):
-                    if not isinstance(doc.get('content', ''), str):
-                        continue
-                        
-                    print(f"Processing document {idx+1}/{len(self.documents)}: {doc.get('source', 'unknown')}")
-                    clean_text = self.document_processor.preprocess_document(doc['content'])
-                    chunks = self.document_processor.chunk_document(clean_text)
-                    
-                    for chunk_idx, chunk in enumerate(chunks):
-                        processed_texts.append(chunk)
-                        metadatas.append({
-                            "source": doc.get('source', ''),
-                            "doc_id": f"doc_{idx}",
-                            "chunk_id": f"chunk_{chunk_idx}",
-                            **doc.get('metadata', {})
-                        })
-                
-                if not processed_texts:
-                    return False
-                
-                print(f"Creating vector store with {len(processed_texts)} chunks...")
-                self.vector_store = Chroma.from_texts(
-                    texts=processed_texts,
-                    metadatas=metadatas,
-                    embedding=self.embeddings,
-                    collection_name="documents"
-                )
-                
-                print("Vector store created successfully!")
-                logger.debug("Async operation completed")
-                return True
-
-            return await asyncio.wait_for(_create_db(), timeout=300)  # 5 minutes timeout
-            
-        except asyncio.TimeoutError:
-            print("Vector database creation timed out after 5 minutes")
-            return False
-        except Exception as e:
-            print(f"Error building vector database: {str(e)}")
-            return False
-
+        
     def add_documents(self, documents: List[str]):
         """Process and add documents to the RAG system."""
         try:
@@ -745,20 +549,22 @@ class SimpleRAG:
         """Get the number of original documents."""
         return len(self.documents)
     
-    def get_context_for_query(self, query: str, k: int = 3) -> str:
-        """Retrieve relevant context for a query."""
+    def get_context_for_query(self, query: str) -> str:
+        """Get formatted context for a query."""
         try:
-            if not self.vector_store:
+            relevant_chunks = self.search_documents(query)
+            if not relevant_chunks:
                 return ""
             
-            results = self.vector_store.similarity_search_with_score(query, k=k)
+            # Format context with clear section breaks
+            context = "\n---\n".join(relevant_chunks)
             
-            relevant_chunks = []
-            for doc, score in results:
-                if score < 1.5:  # Adjust threshold as needed
-                    relevant_chunks.append(doc.page_content)
+            # Limit context length
+            if len(context) > 2000:
+                context = context[:1997] + "..."
             
-            return "\n---\n".join(relevant_chunks)
+            return context
+            
         except Exception as e:
             print(f"Error getting context: {str(e)}")
             return ""
@@ -768,6 +574,52 @@ class SimpleRAG:
         return self.vector_store is not None and len(self.documents) > 0
 
 
+
+
+def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
+    """Chunk text into pieces of specified size with overlap, considering separators."""
+
+    # Split the text by the separators
+    for sep in separators:
+        text = text.replace(sep, "\n")
+
+    chunks = []
+    start = 0
+
+    while start < len(text):
+        # Determine the end of the chunk, accounting for overlap and the chunk size
+        end = min(len(text), start + chunk_size)
+
+        # Find a natural break point at the newline to avoid cutting words
+        if end < len(text):
+            while end > start and text[end] != "\n":
+                end -= 1
+
+        chunk = text[start:end].strip()  # Strip trailing whitespace
+        chunks.append(chunk)
+
+        # Move the start position forward by the overlap size
+        start += chunk_size - overlap_size
+
+    return chunks
+
+
+def load_and_chunk_pdf(file_path):
+    """Extracts text from a PDF file and stores it in the property documents by chunks."""
+
+    with pymupdf.open(file_path) as pdf:
+        text = ""
+        for page in pdf:
+            text += page.get_text()
+
+        chunks = chunk_text(text)
+        documents = []
+        for chunk in chunks:
+            documents.append({"content": chunk, "metadata": pdf.metadata})
+
+        return documents
+
+
 def load_pdf(file_path):
     """Extract text from a PDF file."""
     reader = PdfReader(file_path)
@@ -775,8 +627,7 @@ def load_pdf(file_path):
     return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "pdf"}}
 
 
-async def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
-    """Prepare files for chat with proper progress updates."""
+def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
     if not file_names:
         raise gr.Error("No file selected")
     
@@ -787,38 +638,24 @@ async def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progre
     progress(0.2, desc="Loading files...")
     documents = []
     
-    total_files = len(file_names)
-    for idx, file_name in enumerate(file_names):
+    for file_name in file_names:
         try:
             file_id = record.get_file_id(file_name)
             with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-                temp_file_path = os.path.join(temp_dir, file_name)
-                record.download_file(file_id, temp_file_path)
-                
-                # Only process supported file types
-                if detect_file_type(Path(temp_file_path)):
-                    doc = load_file(temp_file_path)
-                    if doc:
-                        documents.append(doc)
-                        progress((idx + 1) / total_files, 
-                               desc=f"Loaded {idx+1}/{total_files} files")
-                
+                temp_file_location = os.path.join(temp_dir, file_name)
+                record.download_file(file_id, temp_file_location)
+                doc = load_file(temp_file_location)
+                documents.append(doc)
         except Exception as e:
             print(f"Error processing file {file_name}: {str(e)}")
-            continue
 
-    if not documents:
-        raise gr.Error("No valid documents were loaded")
-
-    progress(0.8, desc="Building vector store...")
+    # Create and initialize RAG system
     rag = SimpleRAG()
     rag.documents = documents
-    success = await rag.create_vector_db()
+    rag.embeddings_model = embeddings_model
+    rag.build_vector_db()
     
-    if not success:
-        raise gr.Error("Failed to build vector store")
-    
-    progress(1.0, desc="Ready to chat!")
+    progress(1, desc="Ready to chat")
     return "Ready to chat", rag
 
 
@@ -838,56 +675,61 @@ def preprocess_response(response: str) -> str:
 
 
 def clean_response(response: str) -> str:
-    """Enhanced response cleaning."""
-    # Remove model artifacts
-    response = re.sub(r'\[/?INST\]|\<\/?s\>', '', response)
+    """Clean up model response."""
+    # Remove any system prompts or artifacts
+    if "[/INST]" in response:
+        response = response.split("[/INST]")[-1]
     
-    # Clean up whitespace
-    response = ' '.join(response.split())
+    # Remove any remaining special tokens
+    response = response.replace("<s>", "").replace("</s>", "")
+    response = response.replace("[INST]", "").strip()
     
-    # Remove any markdown artifacts
-    response = re.sub(r'```.*?```', '', response, flags=re.DOTALL)
+    # Remove any repeated whitespace
+    response = " ".join(response.split())
     
-    return response.strip()
+    return response
+
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
-    """Improved chat response generation."""
     try:
-        if not user_session_rag or not user_session_rag.is_initialized():
-            return history + [(message, "The system is not properly initialized. Please wait...")], ""
+        # Better document retrieval with scoring
+        retrieved_docs = user_session_rag.search_documents(message)
+        scored_docs = [(doc, user_session_rag.calculate_relevance_score(doc, message)) for doc in retrieved_docs]
+        scored_docs.sort(key=lambda x: x[1], reverse=True)
         
-        # Get relevant context with improved error handling
-        context = user_session_rag.get_context_for_query(message)
-        if not context:
-            return history + [(message, "I couldn't find relevant information in the documents.")], ""
+        # Take only top N most relevant documents
+        top_docs = [doc for doc, score in scored_docs[:3]]
         
-        # Construct a clear prompt
-        prompt = f"""<s>[INST] Based on the following context, please provide a clear and specific answer:
+        # Improved context formatting with clear section breaks
+        context = "\n---\n".join(top_docs)
+        context = context[:2000]  # Stricter length limit
+        
+        # Clear prompt structure
+        prompt = f"""<s>[INST] You are a helpful assistant. Please provide a clear and concise response.
 
-Context:
+Context (relevant sections from documents):
 {context}
 
-Question: {message}
+User Question: {message}
 
-Please only use information from the provided context. If the answer cannot be found in the context, say so clearly. [/INST]"""
-
-        # Generate response with strict parameters
+Important: Focus only on information from the provided context. If the context doesn't contain relevant information, say so. [/INST]"""
+        
         response = client.text_generation(
             prompt,
-            max_new_tokens=256,
-            temperature=0.1,
+            max_new_tokens=256,  # Even shorter responses
+            temperature=0.1,  # Much lower temperature for consistency
             top_p=0.9,
             repetition_penalty=1.2,
             do_sample=True,
-            stop_sequences=["</s>", "[INST]"]
+            stop_sequences=["</s>", "[INST]"]  # Explicit stop sequences
         )
         
+        # Better response cleaning
         cleaned_response = clean_response(response)
         return history + [(message, cleaned_response)], ""
         
     except Exception as e:
-        error_msg = f"An error occurred: {str(e)}"
-        return history + [(message, error_msg)], ""
+        return history + [(message, f"Error: {str(e)}")], ""
 
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
@@ -899,9 +741,6 @@ with gr.Blocks() as main_demo:
     _state_user_token = gr.State([])
     user_session_rag = gr.State(SimpleRAG())
     loading_state = gr.State(True)  # Track loading state
-    is_processing = False
-    current_step = ""
-    vector_store_state = gr.State(None)
 
     # Header with welcome message and logout button
     with gr.Row():
@@ -917,25 +756,18 @@ with gr.Blocks() as main_demo:
     async def initialize_system(request: gr.Request):
         try:
             user_token = request.request.session["user_access_token"]
-            rag = SimpleRAG()
             num_docs = await process_all_records_and_files(user_token)
-            
-            if num_docs > 0:
-                # Store the RAG instance in the state
-                return (f"Ready to chat! Loaded {num_docs} documents from your records.", 
-                       rag)  # Return both status and RAG instance
-            else:
-                return ("No documents were loaded. Please check your records and file permissions.",
-                       None)
+            loading_state.value = False
+            return f"Ready to chat! Loaded {num_docs} documents from your records."
         except Exception as e:
-            logger.error(f"Error in initialization: {str(e)}")
-            return (f"Error loading records: {str(e)}", None)
+            loading_state.value = False
+            return f"Error loading records: {str(e)}"
 
-    # Update the loading call to handle the state
+    # Update loading status when initialization completes
     main_demo.load(
         fn=initialize_system,
         inputs=None,
-        outputs=[loading_status, vector_store_state],
+        outputs=loading_status,
     )
 
     # Main chat interface
@@ -975,32 +807,21 @@ with gr.Blocks() as main_demo:
         )
 
         # Define chat functionality
-        def chat_response(message, history, rag_state):
-            if not rag_state or not rag_state.is_initialized():
-                return history + [(message, "System not ready. Please wait for initialization to complete...")], ""
-            
-            try:
-                context = rag_state.get_context_for_query(message)
-                if not context:
-                    return history + [(message, "No relevant information found.")], ""
-                
-                response = respond(message, history, rag_state)
-                return history + [(message, response)], ""
-                
-            except Exception as e:
-                logger.error(f"Error in chat response: {str(e)}")
-                return history + [(message, "An error occurred while processing your request.")], ""
+        def chat_response(message, history, loading_state):
+            if loading_state:
+                return history + [(message, "Still loading documents. Please wait...")], ""
+            return respond(message, history, user_session_rag)
 
         # Button actions
         txt_input.submit(
             fn=chat_response,
-            inputs=[txt_input, chatbot, vector_store_state],
+            inputs=[txt_input, chatbot, loading_state],
             outputs=[chatbot, txt_input]
         )
         
         submit_btn.click(
             fn=chat_response,
-            inputs=[txt_input, chatbot, vector_store_state],
+            inputs=[txt_input, chatbot, loading_state],
             outputs=[chatbot, txt_input]
         )
         
