@@ -108,39 +108,56 @@ embeddings_model = SentenceTransformer(
 class DocumentProcessor:
     def __init__(self):
         self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-        # Import nltk and download punkt (not punkt_tab)
-        import nltk
-        nltk.download('punkt', quiet=True)  # This is the correct resource name
+        # Import and set up NLTK with proper error handling
+        try:
+            import nltk
+            nltk.download('punkt', quiet=True)
+            self.nltk_tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+        except Exception as e:
+            print(f"Error initializing NLTK: {str(e)}")
+            # Fallback to basic sentence splitting if NLTK fails
+            self.nltk_tokenizer = None
     
     def preprocess_document(self, text: str) -> str:
         """Clean and preprocess document text."""
-        # Remove special characters and normalize whitespace
         text = re.sub(r'[^\w\s.,!?-]', ' ', text)
         text = ' '.join(text.split())
         return text
     
     def chunk_document(self, text: str, max_chunk_size: int = 500) -> List[str]:
         """Split document into semantic chunks."""
-        sentences = nltk.sent_tokenize(text)
-        chunks = []
-        current_chunk = []
-        current_length = 0
-        
-        for sentence in sentences:
-            sentence_tokens = self.tokenizer(sentence, return_length=True)
-            if current_length + sentence_tokens['length'] > max_chunk_size:
-                if current_chunk:
-                    chunks.append(' '.join(current_chunk))
-                current_chunk = [sentence]
-                current_length = sentence_tokens['length']
+        try:
+            if self.nltk_tokenizer:
+                sentences = self.nltk_tokenizer.tokenize(text)
             else:
-                current_chunk.append(sentence)
-                current_length += sentence_tokens['length']
-        
-        if current_chunk:
-            chunks.append(' '.join(current_chunk))
-        
-        return chunks
+                # Fallback to basic sentence splitting
+                sentences = re.split('[.!?]+', text)
+                sentences = [s.strip() for s in sentences if s.strip()]
+            
+            chunks = []
+            current_chunk = []
+            current_length = 0
+            
+            for sentence in sentences:
+                sentence_tokens = self.tokenizer(sentence, return_length=True)
+                if current_length + sentence_tokens['length'] > max_chunk_size:
+                    if current_chunk:
+                        chunks.append(' '.join(current_chunk))
+                    current_chunk = [sentence]
+                    current_length = sentence_tokens['length']
+                else:
+                    current_chunk.append(sentence)
+                    current_length += sentence_tokens['length']
+            
+            if current_chunk:
+                chunks.append(' '.join(current_chunk))
+            
+            return chunks
+            
+        except Exception as e:
+            print(f"Error in chunk_document: {str(e)}")
+            # Return single chunk if chunking fails
+            return [text]
 
 
 # Dependency to get the current user
