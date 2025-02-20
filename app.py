@@ -286,59 +286,74 @@ def detect_file_type(file_path):
         raise ValueError(f"Unsupported file type: {file_path}")
 
 async def process_all_records_and_files(user_token, progress=gr.Progress()):
-    """Process all records and files with improved error handling and file type detection."""
-    manager = KadiManager(instance=instance, host=host, pat=user_token)
-    all_records = get_all_records(user_token)
-    
-    documents = []
-    total_records = len(all_records)
-    progress(0, desc=f"Found {total_records} records to process")
-    
-    for i, record_id in enumerate(all_records):
-        try:
-            record = manager.record(identifier=record_id)
-            file_list = record.get_filelist().json()["items"]
-            
-            for file_info in file_list:
-                file_name = file_info["name"]
-                try:
-                    file_id = record.get_file_id(file_name)
-                    with tempfile.NameporaryDirectory() as temp_dir:
-                        temp_file_path = os.path.join(temp_dir, file_name)
-                        record.download_file(file_id, temp_file_path)
-                        
-                        # Use the existing file type detection and loading
-                        file_type = detect_file_type(temp_file_path)
-                        doc = load_file(temp_file_path)
-                        
-                        # Add enhanced metadata
-                        doc["metadata"].update({
-                            "record_id": record_id,
-                            "file_name": file_name,
-                            "file_type": file_type
-                        })
-                        documents.append(doc)
-                        
-                except Exception as e:
-                    print(f"Error processing file {file_name}: {str(e)}")
-                    continue
-                    
-            progress((i + 1) / total_records)
-            
-        except Exception as e:
-            print(f"Error processing record {record_id}: {str(e)}")
-            continue
-    
-    # Initialize RAG system with improved error handling
+    """Process all records and files with improved error handling."""
     try:
-        rag = SimpleRAG()
-        rag.documents = documents
-        rag.build_vector_db()
-        global user_session_rag
-        user_session_rag = rag
-        return len(documents)
+        manager = KadiManager(instance=instance, host=host, pat=user_token)
+        all_records = get_all_records(user_token)
+        
+        if not all_records:
+            print("No records found")
+            return 0
+            
+        documents = []
+        total_records = len(all_records)
+        progress(0, desc=f"Found {total_records} records to process")
+        
+        for i, record_id in enumerate(all_records):
+            try:
+                record = manager.record(identifier=record_id)
+                file_list = record.get_filelist().json()["items"]
+                
+                for file_info in file_list:
+                    file_name = file_info["name"]
+                    try:
+                        file_id = record.get_file_id(file_name)
+                        with tempfile.TemporaryDirectory() as temp_dir:  # Fixed typo in TemporaryDirectory
+                            temp_file_path = os.path.join(temp_dir, file_name)
+                            record.download_file(file_id, temp_file_path)
+                            
+                            try:
+                                file_type = detect_file_type(temp_file_path)
+                                doc = load_file(temp_file_path)
+                                
+                                if doc:  # Only add if document was successfully loaded
+                                    doc["metadata"].update({
+                                        "record_id": record_id,
+                                        "file_name": file_name,
+                                        "file_type": file_type
+                                    })
+                                    documents.append(doc)
+                                    print(f"Successfully loaded: {file_name}")
+                            except Exception as e:
+                                print(f"Error loading file {file_name}: {str(e)}")
+                                continue
+                                
+                    except Exception as e:
+                        print(f"Error processing file {file_name}: {str(e)}")
+                        continue
+                        
+                progress((i + 1) / total_records)
+                
+            except Exception as e:
+                print(f"Error processing record {record_id}: {str(e)}")
+                continue
+        
+        # Initialize RAG system
+        if documents:
+            rag = SimpleRAG()
+            rag.documents = documents
+            success = rag.build_vector_db()
+            if success:
+                return len(documents)
+            else:
+                print("Failed to build vector database")
+                return 0
+        else:
+            print("No documents were loaded")
+            return 0
+            
     except Exception as e:
-        print(f"Error initializing RAG system: {str(e)}")
+        print(f"Error in process_all_records_and_files: {str(e)}")
         return 0
 
 def greet(request: gr.Request):
@@ -482,6 +497,43 @@ class SimpleRAG:
         self.embeddings = HuggingFaceEmbeddings()
         self.vector_store = None
         self.documents = []
+
+    def build_vector_db(self):
+        """Initialize the vector database with documents."""
+        try:
+            if not self.documents:
+                return False
+                
+            processed_texts = []
+            metadatas = []
+            
+            for idx, doc in enumerate(self.documents):
+                clean_text = self.document_processor.preprocess_document(doc['content'])
+                chunks = self.document_processor.chunk_document(clean_text)
+                
+                for chunk_idx, chunk in enumerate(chunks):
+                    processed_texts.append(chunk)
+                    metadatas.append({
+                        "source": doc.get('source', ''),
+                        "doc_id": idx,
+                        "chunk_id": chunk_idx,
+                        **doc.get('metadata', {})
+                    })
+            
+            self.vector_store = Chroma(
+                collection_name="documents",
+                embedding_function=self.embeddings
+            )
+            
+            self.vector_store.add_texts(
+                texts=processed_texts,
+                metadatas=metadatas
+            )
+            return True
+            
+        except Exception as e:
+            print(f"Error building vector database: {str(e)}")
+            return False
         
     def add_documents(self, documents: List[str]):
         """Process and add documents to the RAG system."""
@@ -583,8 +635,8 @@ class SimpleRAG:
             return ""
     
     def is_initialized(self) -> bool:
-        """Check if the RAG system is properly initialized."""
-        return self.vector_store is not None and len(self.documents) > 0
+            """Check if the RAG system is properly initialized."""
+            return self.vector_store is not None and len(self.documents) > 0
 
 
 
@@ -765,10 +817,11 @@ with gr.Blocks() as main_demo:
         try:
             user_token = request.request.session["user_access_token"]
             num_docs = await process_all_records_and_files(user_token)
-            loading_state.value = False
-            return f"Ready to chat! Loaded {num_docs} documents from your records."
+            if num_docs > 0:
+                return f"Ready to chat! Loaded {num_docs} documents from your records."
+            else:
+                return "No documents were loaded. Please check your records and file permissions."
         except Exception as e:
-            loading_state.value = False
             return f"Error loading records: {str(e)}"
 
     # Update loading status when initialization completes
