@@ -573,13 +573,13 @@ class SimpleRAG:
                 k=k
             )
             
-            # Filter and sort results
-            threshold = 0.7
+            # Process results - no need for separate scoring function
             filtered_results = []
             seen_doc_ids = set()
             
             for doc, score in results:
-                if score > threshold:
+                # Lower score is better in Chroma's case
+                if score < 1.5:  # Adjust threshold as needed
                     doc_id = doc.metadata.get('doc_id')
                     if doc_id not in seen_doc_ids:  # Avoid duplicate docs
                         filtered_results.append(doc.page_content)
