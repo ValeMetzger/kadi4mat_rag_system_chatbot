@@ -108,14 +108,13 @@ embeddings_model = SentenceTransformer(
 class DocumentProcessor:
     def __init__(self):
         self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-        # Import and set up NLTK with proper error handling
         try:
             import nltk
             nltk.download('punkt', quiet=True)
-            self.nltk_tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+            # Use sent_tokenize directly instead of loading the tokenizer
+            self.nltk_tokenizer = nltk.sent_tokenize
         except Exception as e:
             print(f"Error initializing NLTK: {str(e)}")
-            # Fallback to basic sentence splitting if NLTK fails
             self.nltk_tokenizer = None
     
     def preprocess_document(self, text: str) -> str:
@@ -128,7 +127,7 @@ class DocumentProcessor:
         """Split document into semantic chunks."""
         try:
             if self.nltk_tokenizer:
-                sentences = self.nltk_tokenizer.tokenize(text)
+                sentences = self.nltk_tokenizer(text)
             else:
                 # Fallback to basic sentence splitting
                 sentences = re.split('[.!?]+', text)
@@ -139,15 +138,18 @@ class DocumentProcessor:
             current_length = 0
             
             for sentence in sentences:
-                sentence_tokens = self.tokenizer(sentence, return_length=True)
-                if current_length + sentence_tokens['length'] > max_chunk_size:
+                # Get token count for the sentence
+                tokens = self.tokenizer.encode(sentence)
+                sentence_length = len(tokens)
+                
+                if current_length + sentence_length > max_chunk_size:
                     if current_chunk:
                         chunks.append(' '.join(current_chunk))
                     current_chunk = [sentence]
-                    current_length = sentence_tokens['length']
+                    current_length = sentence_length
                 else:
                     current_chunk.append(sentence)
-                    current_length += sentence_tokens['length']
+                    current_length += sentence_length
             
             if current_chunk:
                 chunks.append(' '.join(current_chunk))
@@ -338,9 +340,14 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
 
     # Initialize RAG system with all documents
     rag = SimpleRAG()
+    
+    # Print document contents for debugging
+    print(f"Loading {len(documents)} documents:")
+    for doc in documents:
+        print(f"Document: {doc['source']}, Content length: {len(doc['content'])}")
+    
     rag.documents = documents
-    rag.embeddings_model = embeddings_model
-    print(f"Building vector database with {len(documents)} documents...")
+    print("Building vector database...")
     rag.build_vector_db()
     
     # Update the global RAG system
@@ -748,44 +755,40 @@ def clean_response(response: str) -> str:
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     try:
-        # Better document retrieval with scoring
-        retrieved_docs = user_session_rag.search_documents(message)
-        scored_docs = [(doc, user_session_rag.calculate_relevance_score(doc, message)) for doc in retrieved_docs]
-        scored_docs.sort(key=lambda x: x[1], reverse=True)
+        # Get context from the RAG system
+        context = user_session_rag.get_context_for_query(message)
         
-        # Take only top N most relevant documents
-        top_docs = [doc for doc, score in scored_docs[:3]]
+        if not context:
+            return history + [(message, "I couldn't find any relevant information in the documents to answer your question.")], ""
         
-        # Improved context formatting with clear section breaks
-        context = "\n---\n".join(top_docs)
-        context = context[:2000]  # Stricter length limit
-        
-        # Clear prompt structure
-        prompt = f"""<s>[INST] You are a helpful assistant. Please provide a clear and concise response.
+        # Construct the prompt with the retrieved context
+        prompt = f"""<s>[INST] You are a helpful assistant. Use the following context to answer the user's question.
+        If you cannot answer the question based on the context, say so.
 
-Context (relevant sections from documents):
+Context:
 {context}
 
 User Question: {message}
 
-Important: Focus only on information from the provided context. If the context doesn't contain relevant information, say so. [/INST]"""
+Please provide a clear and specific answer based on the context provided. [/INST]"""
         
         response = client.text_generation(
             prompt,
-            max_new_tokens=256,  # Even shorter responses
-            temperature=0.1,  # Much lower temperature for consistency
+            max_new_tokens=256,
+            temperature=0.1,
             top_p=0.9,
             repetition_penalty=1.2,
             do_sample=True,
-            stop_sequences=["</s>", "[INST]"]  # Explicit stop sequences
+            stop_sequences=["</s>", "[INST]"]
         )
         
-        # Better response cleaning
         cleaned_response = clean_response(response)
         return history + [(message, cleaned_response)], ""
         
     except Exception as e:
-        return history + [(message, f"Error: {str(e)}")], ""
+        error_msg = f"Error: {str(e)}"
+        print(error_msg)
+        return history + [(message, error_msg)], ""
 
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
