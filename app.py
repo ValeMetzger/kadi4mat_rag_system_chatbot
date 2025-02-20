@@ -46,6 +46,8 @@ from transformers import AutoTokenizer
 from huggingface_hub import InferenceClient
 from typing import List, Tuple
 import re
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 import nltk
 nltk.download(['punkt', 'punkt_tab', 'averaged_perceptron_tagger'])
@@ -108,23 +110,45 @@ embeddings_model = SentenceTransformer(
 )
 
 
+import hashlib
+import pickle
+from pathlib import Path
+
+class CacheManager:
+    def __init__(self, cache_dir=".cache"):
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(exist_ok=True)
+    
+    def get_cache_key(self, data):
+        """Generate a cache key from the data."""
+        return hashlib.md5(str(data).encode()).hexdigest()
+    
+    def get_cached(self, key):
+        """Get data from cache."""
+        cache_file = self.cache_dir / f"{key}.pkl"
+        if cache_file.exists():
+            with open(cache_file, 'rb') as f:
+                return pickle.load(f)
+        return None
+    
+    def set_cached(self, key, data):
+        """Save data to cache."""
+        cache_file = self.cache_dir / f"{key}.pkl"
+        with open(cache_file, 'wb') as f:
+            pickle.dump(data, f)
+
+# Initialize cache manager
+cache_manager = CacheManager()
+
 class DocumentProcessor:
     def __init__(self):
         self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
         nltk.download('punkt', quiet=True)
-        self.max_chunk_length = 500
-    
-    def preprocess_document(self, text: str) -> str:
-        """Clean and preprocess document text."""
-        if not isinstance(text, str):
-            return ""
-        # Remove special characters and normalize whitespace
-        text = re.sub(r'[^\w\s.,!?-]', ' ', text)
-        text = ' '.join(text.split())
-        return text
+        self.max_chunk_length = 512  # Reduced from 1024 to avoid sequence length issues
+        self.overlap = 50  # Add overlap between chunks for better context
     
     def chunk_document(self, text: str) -> List[str]:
-        """Split document into semantic chunks."""
+        """Split document into semantic chunks with improved handling."""
         if not text:
             return []
             
@@ -135,9 +159,30 @@ class DocumentProcessor:
             current_length = 0
             
             for sentence in sentences:
-                # Get token count for the sentence
-                tokens = self.tokenizer.encode(sentence)
+                # Truncate long sentences
+                tokens = self.tokenizer.encode(sentence, truncation=True, max_length=self.max_chunk_length)
                 sentence_length = len(tokens)
+                
+                if sentence_length > self.max_chunk_length:
+                    # Split very long sentences
+                    words = sentence.split()
+                    temp_chunk = []
+                    temp_length = 0
+                    
+                    for word in words:
+                        word_tokens = self.tokenizer.encode(word + ' ')
+                        if temp_length + len(word_tokens) > self.max_chunk_length:
+                            if temp_chunk:
+                                chunks.append(' '.join(temp_chunk))
+                            temp_chunk = [word]
+                            temp_length = len(word_tokens)
+                        else:
+                            temp_chunk.append(word)
+                            temp_length += len(word_tokens)
+                    
+                    if temp_chunk:
+                        chunks.append(' '.join(temp_chunk))
+                    continue
                 
                 if current_length + sentence_length > self.max_chunk_length:
                     if current_chunk:
@@ -155,7 +200,7 @@ class DocumentProcessor:
             
         except Exception as e:
             print(f"Error in chunk_document: {str(e)}")
-            return [text] if text else []
+            return [text[:self.max_chunk_length]] if text else []
 
 
 # Dependency to get the current user
@@ -330,82 +375,71 @@ def detect_file_type(file_path):
         return "csv"
     else:
         raise ValueError(f"Unsupported file type: {file_path}")
+    
+def process_file(manager, record_id, file_info):
+    """Process a single file with improved error handling."""
+    try:
+        file_name = file_info["name"]
+        file_id = manager.get_file_id(file_name)
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_file_path = os.path.join(temp_dir, file_name)
+            manager.download_file(file_id, temp_file_path)
+            
+            doc = load_file(temp_file_path)
+            if doc and doc.get('content'):
+                doc["metadata"].update({
+                    "record_id": record_id,
+                    "file_name": file_name,
+                    "file_type": detect_file_type(temp_file_path)
+                })
+                return doc
+    except Exception as e:
+        print(f"Error processing file {file_name}: {str(e)}")
+    return None
 
 async def process_all_records_and_files(user_token, progress=gr.Progress()):
-    """Process all records and files with improved error handling."""
+    """Process all records and files with parallel processing."""
     try:
         manager = KadiManager(instance=instance, host=host, pat=user_token)
         all_records = get_all_records(user_token)
         
         if not all_records:
-            print("No records found")
             return 0
             
         documents = []
         total_records = len(all_records)
         progress(0, desc=f"Found {total_records} records to process")
         
-        for i, record_id in enumerate(all_records):
-            try:
-                record = manager.record(identifier=record_id)
-                file_list = record.get_filelist().json()["items"]
-                
-                for file_info in file_list:
-                    file_name = file_info["name"]
-                    try:
-                        file_id = record.get_file_id(file_name)
-                        with tempfile.TemporaryDirectory() as temp_dir:
-                            temp_file_path = os.path.join(temp_dir, file_name)
-                            record.download_file(file_id, temp_file_path)
-                            
-                            try:
-                                file_type = detect_file_type(temp_file_path)
-                                doc = load_file(temp_file_path)
-                                
-                                # Check if document content is not empty
-                                if doc and doc.get('content') and len(doc['content'].strip()) > 0:
-                                    doc["metadata"].update({
-                                        "record_id": record_id,
-                                        "file_name": file_name,
-                                        "file_type": file_type
-                                    })
-                                    documents.append(doc)
-                                    print(f"Successfully loaded: {file_name}")
-                                else:
-                                    print(f"Skipped empty document: {file_name}")
-                            except Exception as e:
-                                print(f"Error loading file {file_name}: {str(e)}")
-                                continue
-                                
-                    except Exception as e:
-                        print(f"Error processing file {file_name}: {str(e)}")
-                        continue
-                        
-                progress((i + 1) / total_records)
-                
-            except Exception as e:
-                print(f"Error processing record {record_id}: {str(e)}")
-                continue
+        # Process records in parallel
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            for i, record_id in enumerate(all_records):
+                try:
+                    record = manager.record(identifier=record_id)
+                    file_list = record.get_filelist().json()["items"]
+                    
+                    # Process files in parallel for each record
+                    process_file_partial = partial(process_file, record, record_id)
+                    file_docs = list(executor.map(process_file_partial, file_list))
+                    
+                    # Filter out None results and add to documents
+                    documents.extend([doc for doc in file_docs if doc])
+                    
+                    progress((i + 1) / total_records)
+                    
+                except Exception as e:
+                    print(f"Error processing record {record_id}: {str(e)}")
+                    continue
         
-        # Initialize RAG system only if we have documents
         if documents:
-            try:
-                rag = SimpleRAG()
-                rag.documents = documents
-                success = rag.build_vector_db()
-                if success:
-                    print(f"Successfully processed {len(documents)} documents")
-                    return len(documents)
-                else:
-                    print("Failed to build vector database")
-                    return 0
-            except Exception as e:
-                print(f"Error building vector database: {str(e)}")
-                return 0
-        else:
-            print("No valid documents were loaded")
-            return 0
-            
+            rag = SimpleRAG()
+            rag.documents = documents
+            success = rag.build_vector_db()
+            if success:
+                return len(documents)
+        
+        return 0
+        
     except Exception as e:
         print(f"Error in process_all_records_and_files: {str(e)}")
         return 0
@@ -548,32 +582,34 @@ with gr.Blocks() as login_demo:
 class SimpleRAG:
     def __init__(self):
         self.document_processor = DocumentProcessor()
-        # Explicitly specify the model name
         self.embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-mpnet-base-v2"
+            model_name="sentence-transformers/all-mpnet-base-v2",
+            cache_folder=".cache/embeddings"
         )
         self.vector_store = None
         self.documents = []
 
     def build_vector_db(self):
-        """Initialize the vector database with documents."""
+        """Initialize the vector database with caching."""
         try:
             if not self.documents:
                 return False
-                
+            
+            # Check cache for processed documents
+            cache_key = cache_manager.get_cache_key(str(self.documents))
+            cached_data = cache_manager.get_cached(cache_key)
+            
+            if cached_data:
+                self.vector_store = cached_data
+                return True
+            
+            # Process documents if not cached
             processed_texts = []
             metadatas = []
             
             for idx, doc in enumerate(self.documents):
-                if not isinstance(doc.get('content', ''), str):
-                    print(f"Skipping document {doc.get('source', 'unknown')}: invalid content type")
-                    continue
-                    
                 clean_text = self.document_processor.preprocess_document(doc['content'])
                 chunks = self.document_processor.chunk_document(clean_text)
-                
-                # Ensure chunks are strings
-                chunks = [str(chunk) for chunk in chunks if chunk]
                 
                 for chunk_idx, chunk in enumerate(chunks):
                     processed_texts.append(chunk)
@@ -584,11 +620,6 @@ class SimpleRAG:
                         **doc.get('metadata', {})
                     })
             
-            if not processed_texts:
-                print("No valid text chunks to process")
-                return False
-                
-            # Create a new Chroma collection
             self.vector_store = Chroma.from_texts(
                 texts=processed_texts,
                 metadatas=metadatas,
@@ -596,13 +627,13 @@ class SimpleRAG:
                 collection_name="documents"
             )
             
-            print(f"Successfully created vector store with {len(processed_texts)} chunks")
+            # Cache the processed data
+            cache_manager.set_cached(cache_key, self.vector_store)
+            
             return True
             
         except Exception as e:
             print(f"Error building vector database: {str(e)}")
-            import traceback
-            traceback.print_exc()
             return False
         
     def add_documents(self, documents: List[str]):
