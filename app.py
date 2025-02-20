@@ -903,107 +903,100 @@ app = gr.mount_gradio_app(app, login_demo, path="/main")
 # Gradio interface
 with gr.Blocks() as main_demo:
     # State variables
+    _state_user_token = gr.State([])
+    user_session_rag = gr.State(SimpleRAG())
     loading_state = gr.State(True)  # Track loading state
-    initialization_complete = gr.State(False)  # Track initialization
-    system_ready = gr.State(False)  # Track if system is ready for chat
 
-    async def initialize_system(request: gr.Request):
-        """Initialize system with proper state management"""
-        try:
-            user_token = request.request.session["user_access_token"]
-            logger.info("Starting system initialization")
-            
-            num_docs = await process_all_records_and_files(user_token)
-            
-            if num_docs > 0:
-                # Update states
-                loading_state.value = False
-                initialization_complete.value = True
-                system_ready.value = True
-                
-                logger.info("System initialization complete")
-                return f"Ready to chat! Loaded {num_docs} documents from your records."
-            else:
-                loading_state.value = False
-                initialization_complete.value = True
-                system_ready.value = False
-                
-                logger.warning("No documents were loaded")
-                return "No documents were loaded. Please check your records and file permissions."
-                
-        except Exception as e:
-            loading_state.value = False
-            initialization_complete.value = True
-            system_ready.value = False
-            
-            logger.error(f"Initialization error: {str(e)}")
-            return f"Error loading records: {str(e)}"
+    # Header with welcome message and logout button
+    with gr.Row():
+        with gr.Column(scale=7):
+            welcome_msg = gr.Markdown("Welcome to Chatbot!")
+            main_demo.load(greet, None, welcome_msg)
+        with gr.Column(scale=1):
+            gr.Button("Logout", link="/logout")
 
-    # Update chat interface to respect system state
+    loading_status = gr.Markdown("Initializing system and loading records...")
+
+    # Update loading status when initialization completes
+    main_demo.load(
+        fn=initialize_system,
+        inputs=None,
+        outputs=loading_status,
+    )
+
+    # Main chat interface
     with gr.Tab("Chat"):
         with gr.Row():
-            chatbot = gr.Chatbot(height=600)
-            system_status = gr.Markdown("System Status: Initializing...")
+            # Chat display
+            with gr.Column(scale=7):
+                chatbot = gr.Chatbot(height=600)
+            # System status
+            with gr.Column(scale=3):
+                system_status = gr.Markdown("System Status: Initializing...")
 
+        # Input area
         with gr.Row():
             txt_input = gr.Textbox(
                 show_label=False,
                 placeholder="Type your question here...",
                 lines=2,
-                scale=8,
-                interactive=False  # Start as disabled
+                scale=8
             )
 
-        def update_ui_state(init_complete, sys_ready):
-            """Update UI elements based on system state"""
-            txt_input.interactive = sys_ready
-            status = "Ready" if sys_ready else "Not Ready"
-            if not init_complete:
-                status = "Initializing..."
-            return f"System Status: {status}"
+        # Buttons
+        with gr.Row():
+            submit_btn = gr.Button("Submit", scale=2)
+            refresh_btn = gr.Button("Clear Chat", scale=1, variant="secondary")
 
-        # Update UI state when initialization completes
-        initialization_complete.change(
-            fn=update_ui_state,
-            inputs=[initialization_complete, system_ready],
-            outputs=[system_status]
+        # Example questions
+        gr.Examples(
+            examples=[
+                ["Summarize the contents of my records."],
+                ["What are the main topics discussed in my documents?"],
+                ["Find documents related to material science."],
+                ["How many records do I have in total?"],
+            ],
+            inputs=[txt_input]
         )
 
-        # Modified chat response function
-        def chat_response(message, history, sys_ready):
-            if not sys_ready:
-                return history + [(message, "System is not ready. Please wait for initialization to complete.")], ""
-            return respond(message, history)
+        # Define chat functionality
+        def chat_response(message, history, loading_state):
+            if loading_state:
+                return history + [(message, "Still loading documents. Please wait...")], ""
+            return respond(message, history, user_session_rag)
 
-        # Connect chat inputs with state checks
+        # Button actions
         txt_input.submit(
             fn=chat_response,
-            inputs=[txt_input, chatbot, system_ready],
+            inputs=[txt_input, chatbot, loading_state],
             outputs=[chatbot, txt_input]
         )
 
-app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
-
-@app.get("/gradio")
-async def gradio_route(request: Request, user=Depends(get_user)):
-    """Handle Gradio route with proper initialization"""
-    if not user:
-        return RedirectResponse(url="/login")
-        
-    try:
-        # Clear any existing states
-        request.session["initialization_started"] = False
-        request.session["system_ready"] = False
-        
-        logger.info(f"Starting Gradio interface for user: {user}")
-        return main_demo.launch(
-            prevent_thread_lock=True,
-            show_api=False,
-            share=False
+        submit_btn.click(
+            fn=chat_response,
+            inputs=[txt_input, chatbot, loading_state],
+            outputs=[chatbot, txt_input]
         )
-    except Exception as e:
-        logger.error(f"Error launching Gradio: {str(e)}")
-        return RedirectResponse(url="/login")
+
+        refresh_btn.click(
+            fn=lambda: ([], ""),
+            outputs=[chatbot, txt_input]
+        )
+
+        # Update system status periodically
+        def update_status(loading_state):
+            if loading_state:
+                return "System Status: Loading documents..."
+            return "System Status: Ready"
+
+        main_demo.load(
+            fn=update_status,
+            inputs=[loading_state],
+            outputs=[system_status],
+            every=1
+        )
+
+app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
 
 if __name__ == "__main__":
     uvicorn.run(app, port=7860, host="0.0.0.0")
