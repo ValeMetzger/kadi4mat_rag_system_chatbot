@@ -44,7 +44,7 @@ from huggingface_hub import InferenceClient
 from typing import List, Tuple
 import re
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
+from functools import partial, lru_cache
 import logging
 import asyncio
 
@@ -218,20 +218,23 @@ class DocumentProcessor:
             print(f"Error in chunk_document: {str(e)}")
             return [text[:self.max_chunk_length]] if text else []
 
-# Dependency to get the current user
-def get_user(request: Request):
-    """Validate and get user information."""
-    token = request.session.get("user_access_token")
-    if not token:
-        return None
-        
+@lru_cache(maxsize=1000)
+def get_cached_user(token: str):
+    """Cached version of user validation."""
     try:
         manager = KadiManager(instance=instance, host=host, pat=token)
         user = manager.pat_user
         return user.meta["displayname"]
     except Exception as e:
-        print(f"Error getting user info: {e}")
+        logger.error(f"Error getting user info: {e}")
         return None
+
+def get_user(request: Request):
+    """Validate and get user information with caching."""
+    token = request.session.get("user_access_token")
+    if not token:
+        return None
+    return get_cached_user(token)
 
 
 @app.get("/")
@@ -898,6 +901,7 @@ with gr.Blocks() as main_demo:
     loading_state = gr.State(True)  # Track loading state
     is_processing = False
     current_step = ""
+    vector_store_state = gr.State(None)
 
     # Header with welcome message and logout button
     with gr.Row():
@@ -913,19 +917,25 @@ with gr.Blocks() as main_demo:
     async def initialize_system(request: gr.Request):
         try:
             user_token = request.request.session["user_access_token"]
+            rag = SimpleRAG()
             num_docs = await process_all_records_and_files(user_token)
+            
             if num_docs > 0:
-                return f"Ready to chat! Loaded {num_docs} documents from your records."
+                # Store the RAG instance in the state
+                return (f"Ready to chat! Loaded {num_docs} documents from your records.", 
+                       rag)  # Return both status and RAG instance
             else:
-                return "No documents were loaded. Please check your records and file permissions."
+                return ("No documents were loaded. Please check your records and file permissions.",
+                       None)
         except Exception as e:
-            return f"Error loading records: {str(e)}"
+            logger.error(f"Error in initialization: {str(e)}")
+            return (f"Error loading records: {str(e)}", None)
 
-    # Update loading status when initialization completes
+    # Update the loading call to handle the state
     main_demo.load(
         fn=initialize_system,
         inputs=None,
-        outputs=loading_status,
+        outputs=[loading_status, vector_store_state],
     )
 
     # Main chat interface
@@ -965,21 +975,32 @@ with gr.Blocks() as main_demo:
         )
 
         # Define chat functionality
-        def chat_response(message, history, loading_state):
-            if loading_state:
-                return history + [(message, "Still loading documents. Please wait...")], ""
-            return respond(message, history, user_session_rag)
+        def chat_response(message, history, rag_state):
+            if not rag_state or not rag_state.is_initialized():
+                return history + [(message, "System not ready. Please wait for initialization to complete...")], ""
+            
+            try:
+                context = rag_state.get_context_for_query(message)
+                if not context:
+                    return history + [(message, "No relevant information found.")], ""
+                
+                response = respond(message, history, rag_state)
+                return history + [(message, response)], ""
+                
+            except Exception as e:
+                logger.error(f"Error in chat response: {str(e)}")
+                return history + [(message, "An error occurred while processing your request.")], ""
 
         # Button actions
         txt_input.submit(
             fn=chat_response,
-            inputs=[txt_input, chatbot, loading_state],
+            inputs=[txt_input, chatbot, vector_store_state],
             outputs=[chatbot, txt_input]
         )
         
         submit_btn.click(
             fn=chat_response,
-            inputs=[txt_input, chatbot, loading_state],
+            inputs=[txt_input, chatbot, vector_store_state],
             outputs=[chatbot, txt_input]
         )
         
