@@ -141,11 +141,21 @@ class CacheManager:
 cache_manager = CacheManager()
 
 class DocumentProcessor:
+    """Handles document chunking and preprocessing."""
     def __init__(self):
         self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
         nltk.download('punkt', quiet=True)
-        self.max_chunk_length = 512  # Reduced from 1024 to avoid sequence length issues
-        self.overlap = 50  # Add overlap between chunks for better context
+        self.max_chunk_length = 512
+        self.overlap = 50
+    
+    def preprocess_document(self, text: str) -> str:
+        """Clean and preprocess document text."""
+        if not isinstance(text, str):
+            return ""
+        # Remove special characters and normalize whitespace
+        text = re.sub(r'[^\w\s.,!?-]', ' ', text)
+        text = ' '.join(text.split())
+        return text
     
     def chunk_document(self, text: str) -> List[str]:
         """Split document into semantic chunks with improved handling."""
@@ -153,6 +163,8 @@ class DocumentProcessor:
             return []
             
         try:
+            # First preprocess the text
+            text = self.preprocess_document(text)
             sentences = nltk.sent_tokenize(text)
             chunks = []
             current_chunk = []
@@ -160,7 +172,8 @@ class DocumentProcessor:
             
             for sentence in sentences:
                 # Truncate long sentences
-                tokens = self.tokenizer.encode(sentence, truncation=True, max_length=self.max_chunk_length)
+                tokens = self.tokenizer.encode(sentence, truncation=True, 
+                                            max_length=self.max_chunk_length)
                 sentence_length = len(tokens)
                 
                 if sentence_length > self.max_chunk_length:
@@ -201,7 +214,6 @@ class DocumentProcessor:
         except Exception as e:
             print(f"Error in chunk_document: {str(e)}")
             return [text[:self.max_chunk_length]] if text else []
-
 
 # Dependency to get the current user
 def get_user(request: Request):
