@@ -498,10 +498,69 @@ class SimpleRAG:
         )
         self.vector_store = None
         self.documents = []
-        
+    
+    def search_documents(self, query: str, k: int = 3) -> List[str]:
+        """Search for relevant document chunks."""
+        try:
+            if not self.vector_store:
+                print("Warning: Vector store not initialized")
+                return []
+            
+            print(f"Searching for: {query}")
+            
+            # Search with scores
+            results = self.vector_store.similarity_search_with_score(
+                query,
+                k=k
+            )
+            
+            print(f"Found {len(results)} results")
+            
+            # Process results - use a more lenient threshold
+            filtered_results = []
+            seen_doc_ids = set()
+            
+            for doc, score in results:
+                print(f"Score: {score}, Content: {doc.page_content[:100]}...")
+                # Adjust threshold to be more lenient (higher number means more results)
+                if score < 2.0:  # Changed from 1.5 to 2.0
+                    doc_id = doc.metadata.get('doc_id')
+                    if doc_id not in seen_doc_ids:  # Avoid duplicate docs
+                        filtered_results.append(doc.page_content)
+                        seen_doc_ids.add(doc_id)
+            
+            print(f"Returning {len(filtered_results)} filtered results")
+            return filtered_results
+            
+        except Exception as e:
+            print(f"Error searching documents: {str(e)}")
+            return []
+
+    def get_context_for_query(self, query: str) -> str:
+        """Get formatted context for a query."""
+        try:
+            relevant_chunks = self.search_documents(query)
+            if not relevant_chunks:
+                return ""
+            
+            # Format context with clear section breaks
+            context = "\n---\n".join(relevant_chunks)
+            
+            # Limit context length if needed
+            if len(context) > 2000:
+                context = context[:1997] + "..."
+            
+            return context
+            
+        except Exception as e:
+            print(f"Error getting context: {str(e)}")
+            return ""
+
     def build_vector_db(self):
         """Initialize or rebuild the vector database with current documents."""
         try:
+            from langchain_community.vectorstores import Chroma  # Updated import
+            
             processed_chunks = []
             chunk_metadata = []
             
@@ -527,7 +586,7 @@ class SimpleRAG:
                 print("Warning: No chunks were created from the documents")
                 return 0
             
-            # Initialize vector store
+            # Initialize vector store with updated import
             self.vector_store = Chroma(
                 collection_name="documents",
                 embedding_function=self.embeddings
@@ -581,43 +640,6 @@ class SimpleRAG:
             print(f"Error adding documents: {str(e)}")
             return 0
     
-    def search_documents(self, query: str, k: int = 3) -> List[str]:
-        """Search for relevant document chunks."""
-        try:
-            if not self.vector_store:
-                print("Warning: Vector store not initialized")
-                return []
-            
-            print(f"Searching for: {query}")
-            
-            # Search with scores
-            results = self.vector_store.similarity_search_with_score(
-                query,
-                k=k
-            )
-            
-            print(f"Found {len(results)} results")
-            
-            # Process results
-            filtered_results = []
-            seen_doc_ids = set()
-            
-            for doc, score in results:
-                print(f"Score: {score}, Content: {doc.page_content[:100]}...")
-                # Lower score is better in Chroma's case
-                if score < 1.5:  # Adjust threshold as needed
-                    doc_id = doc.metadata.get('doc_id')
-                    if doc_id not in seen_doc_ids:  # Avoid duplicate docs
-                        filtered_results.append(doc.page_content)
-                        seen_doc_ids.add(doc_id)
-            
-            print(f"Returning {len(filtered_results)} filtered results")
-            return filtered_results
-            
-        except Exception as e:
-            print(f"Error searching documents: {str(e)}")
-            return []
-    
     def clear_documents(self):
         """Clear all documents from the RAG system."""
         try:
@@ -631,26 +653,6 @@ class SimpleRAG:
     def get_document_count(self) -> int:
         """Get the number of original documents."""
         return len(self.documents)
-    
-    def get_context_for_query(self, query: str) -> str:
-        """Get formatted context for a query."""
-        try:
-            relevant_chunks = self.search_documents(query)
-            if not relevant_chunks:
-                return ""
-            
-            # Format context with clear section breaks
-            context = "\n---\n".join(relevant_chunks)
-            
-            # Limit context length
-            if len(context) > 2000:
-                context = context[:1997] + "..."
-            
-            return context
-            
-        except Exception as e:
-            print(f"Error getting context: {str(e)}")
-            return ""
     
     def is_initialized(self) -> bool:
         """Check if the RAG system is properly initialized."""
