@@ -351,43 +351,44 @@ def load_file(file_path):
         return None
 
 def detect_file_type(file_path):
-    """Enhanced file type detection."""
-    # Simplify to just use Path.suffix
+    """Enhanced file type detection with allowed types only."""
     ext = Path(file_path).suffix.lower()
     
-    # Simple mapping without mimetypes
-    if ext == ".pdf":
-        return "pdf"
-    elif ext == ".docx":
-        return "docx"
-    elif ext in [".xls", ".xlsx"]:
-        return "excel"
-    elif ext in [".txt", ".py", ".flow"]:
-        return "txt"
-    elif ext == ".md":
-        return "md"
-    elif ext == ".csv":
-        return "csv"
-    else:
-        raise ValueError(f"Unsupported file type: {file_path}")
+    # Define allowed file types
+    ALLOWED_EXTENSIONS = {
+        ".pdf": "pdf",
+        ".docx": "docx",
+        ".doc": "docx",
+        ".txt": "txt",
+        ".md": "md",
+        ".csv": "csv",
+        ".xlsx": "excel",
+        ".xls": "excel"
+    }
+    
+    return ALLOWED_EXTENSIONS.get(ext, None)
     
 def process_file(manager, record_id, file_info):
-    """Process a single file with improved error handling and timeout."""
+    """Process a single file with improved filtering."""
     try:
         file_name = file_info["name"]
         
-        # Get record object first
+        # Check if file type is supported before processing
+        file_type = detect_file_type(Path(file_name))
+        if not file_type:
+            print(f"Skipping unsupported file type: {file_name}")
+            return None
+        
         record = manager.record(identifier=record_id)
-        file_id = record.get_file_id(file_name)  # Get file ID from record object
+        file_id = record.get_file_id(file_name)
         
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_file_path = os.path.join(temp_dir, file_name)
             
-            # Add timeout for file download
             try:
-                record.download_file(file_id, temp_file_path)  # Use record to download
+                record.download_file(file_id, temp_file_path)
             except Exception as e:
-                print(f"Timeout downloading {file_name}: {str(e)}")
+                print(f"Error downloading {file_name}: {str(e)}")
                 return None
             
             # Skip large files
@@ -400,85 +401,60 @@ def process_file(manager, record_id, file_info):
                 doc["metadata"].update({
                     "record_id": record_id,
                     "file_name": file_name,
-                    "file_type": detect_file_type(temp_file_path)
+                    "file_type": file_type
                 })
                 print(f"Successfully loaded: {file_name}")
                 return doc
+            
     except Exception as e:
         print(f"Error processing file {file_name}: {str(e)}")
-        import traceback
-        traceback.print_exc()  # This will help debug any other issues
     return None
 
 async def process_all_records_and_files(user_token, progress=gr.Progress()):
-    """Process all records and files with optimized parallel processing."""
+    """Process all records and files with improved feedback."""
     try:
         manager = KadiManager(instance=instance, host=host, pat=user_token)
         all_records = get_all_records(user_token)
         
         if not all_records:
-            print("No records found")
             return 0
             
         documents = []
         total_records = len(all_records)
         progress(0, desc=f"Found {total_records} records to process")
         
-        # Process records in parallel with a larger thread pool
-        with ThreadPoolExecutor(max_workers=4) as executor:  # Reduced workers to prevent overload
-            # Process records in batches to avoid memory issues
-            batch_size = 5
-            for i in range(0, len(all_records), batch_size):
-                batch = all_records[i:i + batch_size]
-                batch_futures = []
+        for i, record_id in enumerate(all_records):
+            try:
+                record = manager.record(identifier=record_id)
+                file_list = record.get_filelist().json()["items"]
                 
-                for record_id in batch:
-                    try:
-                        record = manager.record(identifier=record_id)
-                        file_list = record.get_filelist().json()["items"]
+                # Process files sequentially for better control and feedback
+                for file_info in file_list:
+                    doc = process_file(manager, record_id, file_info)
+                    if doc:
+                        documents.append(doc)
                         
-                        # Process files in parallel for each record
-                        process_file_partial = partial(process_file, manager, record_id)
-                        futures = [executor.submit(process_file_partial, file_info) 
-                                 for file_info in file_list]
-                        batch_futures.extend(futures)
+                progress((i + 1) / total_records, 
+                        desc=f"Processed {i+1}/{total_records} records")
                         
-                    except Exception as e:
-                        print(f"Error processing record {record_id}: {str(e)}")
-                        continue
-                
-                # Wait for batch completion and collect results
-                for future in batch_futures:
-                    try:
-                        result = future.result(timeout=30)  # Add timeout
-                        if result:
-                            documents.append(result)
-                    except Exception as e:
-                        print(f"Error collecting result: {str(e)}")
-                
-                progress((i + batch_size) / total_records)
+            except Exception as e:
+                print(f"Error processing record {record_id}: {str(e)}")
+                continue
         
         if documents:
-            print(f"Processing {len(documents)} documents...")
+            print(f"Building vector store for {len(documents)} documents...")
             rag = SimpleRAG()
             rag.documents = documents
-            
-            # Build vector store with progress updates
-            print("Building vector store...")
             success = rag.build_vector_db()
-            if success:
-                return len(documents)
-            else:
-                print("Failed to build vector database")
-                return 0
-        else:
-            print("No documents were loaded")
-            return 0
             
+            if success:
+                print("Vector store built successfully!")
+                return len(documents)
+        
+        return 0
+        
     except Exception as e:
         print(f"Error in process_all_records_and_files: {str(e)}")
-        import traceback
-        traceback.print_exc()
         return 0
 
 def greet(request: gr.Request):
@@ -628,49 +604,44 @@ class SimpleRAG:
         self.documents = []
 
     def build_vector_db(self):
-        """Initialize the vector database with improved performance."""
+        """Initialize the vector database with improved feedback."""
         try:
             if not self.documents:
                 return False
             
-            # Process documents in smaller batches
-            batch_size = 10
-            all_processed_texts = []
-            all_metadatas = []
+            print(f"Processing {len(self.documents)} documents...")
+            processed_texts = []
+            metadatas = []
             
-            for i in range(0, len(self.documents), batch_size):
-                batch = self.documents[i:i + batch_size]
-                
-                for idx, doc in enumerate(batch):
-                    if not isinstance(doc.get('content', ''), str):
-                        continue
-                        
-                    clean_text = self.document_processor.preprocess_document(doc['content'])
-                    chunks = self.document_processor.chunk_document(clean_text)
+            for idx, doc in enumerate(self.documents):
+                if not isinstance(doc.get('content', ''), str):
+                    continue
                     
-                    for chunk_idx, chunk in enumerate(chunks):
-                        all_processed_texts.append(chunk)
-                        all_metadatas.append({
-                            "source": doc.get('source', ''),
-                            "doc_id": f"doc_{idx}",
-                            "chunk_id": f"chunk_{chunk_idx}",
-                            **doc.get('metadata', {})
-                        })
+                print(f"Processing document {idx+1}/{len(self.documents)}: {doc.get('source', 'unknown')}")
+                clean_text = self.document_processor.preprocess_document(doc['content'])
+                chunks = self.document_processor.chunk_document(clean_text)
                 
-                print(f"Processed batch {i//batch_size + 1}/{(len(self.documents)-1)//batch_size + 1}")
+                for chunk_idx, chunk in enumerate(chunks):
+                    processed_texts.append(chunk)
+                    metadatas.append({
+                        "source": doc.get('source', ''),
+                        "doc_id": f"doc_{idx}",
+                        "chunk_id": f"chunk_{chunk_idx}",
+                        **doc.get('metadata', {})
+                    })
             
-            if not all_processed_texts:
+            if not processed_texts:
                 return False
             
-            # Create vector store in batches
+            print(f"Creating vector store with {len(processed_texts)} chunks...")
             self.vector_store = Chroma.from_texts(
-                texts=all_processed_texts,
-                metadatas=all_metadatas,
+                texts=processed_texts,
+                metadatas=metadatas,
                 embedding=self.embeddings,
                 collection_name="documents"
             )
             
-            print(f"Successfully created vector store with {len(all_processed_texts)} chunks")
+            print("Vector store created successfully!")
             return True
             
         except Exception as e:
