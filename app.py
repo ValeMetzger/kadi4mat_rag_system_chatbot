@@ -313,12 +313,14 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
 
     documents = []
     total_records = len(all_records)
+    print(f"Found {total_records} records to process")
     progress(0, desc=f"Found {total_records} records to process")
 
     for i, record_id in enumerate(all_records):
         try:
             record = manager.record(identifier=record_id)
             file_names = [info["name"] for info in record.get_filelist().json()["items"]]
+            print(f"Processing record {record_id} with {len(file_names)} files")
             
             for file_name in file_names:
                 try:
@@ -330,6 +332,7 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
                         # Add record metadata to the document
                         doc["metadata"]["record_id"] = record_id
                         documents.append(doc)
+                        print(f"Successfully processed file: {file_name}")
                 except Exception as e:
                     print(f"Error processing file {file_name} in record {record_id}: {str(e)}")
 
@@ -338,16 +341,12 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
             print(f"Error processing record {record_id}: {str(e)}")
             continue
 
+    print(f"\nProcessed {len(documents)} documents in total")
+    
     # Initialize RAG system with all documents
     rag = SimpleRAG()
-    
-    # Print document contents for debugging
-    print(f"Loading {len(documents)} documents:")
-    for doc in documents:
-        print(f"Document: {doc['source']}, Content length: {len(doc['content'])}")
-    
     rag.documents = documents
-    print("Building vector database...")
+    print("\nBuilding vector database...")
     rag.build_vector_db()
     
     # Update the global RAG system
@@ -504,11 +503,29 @@ class SimpleRAG:
         """Initialize or rebuild the vector database with current documents."""
         try:
             processed_chunks = []
-            for doc in self.documents:
+            chunk_metadata = []
+            
+            # Process each document and keep track of metadata
+            for doc_idx, doc in enumerate(self.documents):
                 # Preprocess and chunk the document content
                 clean_text = self.document_processor.preprocess_document(doc['content'])
                 chunks = self.document_processor.chunk_document(clean_text)
-                processed_chunks.extend(chunks)
+                
+                # Add metadata for each chunk from this document
+                for chunk_idx, chunk in enumerate(chunks):
+                    processed_chunks.append(chunk)
+                    chunk_metadata.append({
+                        "chunk_id": len(processed_chunks) - 1,
+                        "doc_id": f"doc_{doc_idx}",
+                        "source": doc.get('source', 'unknown'),
+                        "file_type": doc.get('metadata', {}).get('file_type', 'unknown')
+                    })
+            
+            print(f"Created {len(processed_chunks)} chunks from {len(self.documents)} documents")
+            
+            if not processed_chunks:
+                print("Warning: No chunks were created from the documents")
+                return 0
             
             # Initialize vector store
             self.vector_store = Chroma(
@@ -516,17 +533,13 @@ class SimpleRAG:
                 embedding_function=self.embeddings
             )
             
-            # Add documents with metadata
+            # Add chunks with their corresponding metadata
             self.vector_store.add_texts(
                 texts=processed_chunks,
-                metadatas=[{
-                    "chunk_id": i,
-                    "doc_id": f"doc_{i//5}",  # Assuming ~5 chunks per doc
-                    "source": doc.get('source', 'unknown'),
-                    "file_type": doc.get('metadata', {}).get('file_type', 'unknown')
-                } for i, doc in enumerate(self.documents)]
+                metadatas=chunk_metadata
             )
             
+            print(f"Successfully added {len(processed_chunks)} chunks to vector store")
             return len(processed_chunks)
             
         except Exception as e:
@@ -572,7 +585,10 @@ class SimpleRAG:
         """Search for relevant document chunks."""
         try:
             if not self.vector_store:
+                print("Warning: Vector store not initialized")
                 return []
+            
+            print(f"Searching for: {query}")
             
             # Search with scores
             results = self.vector_store.similarity_search_with_score(
@@ -580,11 +596,14 @@ class SimpleRAG:
                 k=k
             )
             
-            # Process results - no need for separate scoring function
+            print(f"Found {len(results)} results")
+            
+            # Process results
             filtered_results = []
             seen_doc_ids = set()
             
             for doc, score in results:
+                print(f"Score: {score}, Content: {doc.page_content[:100]}...")
                 # Lower score is better in Chroma's case
                 if score < 1.5:  # Adjust threshold as needed
                     doc_id = doc.metadata.get('doc_id')
@@ -592,6 +611,7 @@ class SimpleRAG:
                         filtered_results.append(doc.page_content)
                         seen_doc_ids.add(doc_id)
             
+            print(f"Returning {len(filtered_results)} filtered results")
             return filtered_results
             
         except Exception as e:
