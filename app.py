@@ -110,38 +110,52 @@ embeddings_model = SentenceTransformer(
 
 class DocumentProcessor:
     def __init__(self):
-        self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B")
+        self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
         nltk.download('punkt', quiet=True)
+        self.max_chunk_length = 500
     
     def preprocess_document(self, text: str) -> str:
         """Clean and preprocess document text."""
+        if not isinstance(text, str):
+            return ""
         # Remove special characters and normalize whitespace
         text = re.sub(r'[^\w\s.,!?-]', ' ', text)
         text = ' '.join(text.split())
         return text
     
-    def chunk_document(self, text: str, max_chunk_size: int = 500) -> List[str]:
+    def chunk_document(self, text: str) -> List[str]:
         """Split document into semantic chunks."""
-        sentences = nltk.sent_tokenize(text)
-        chunks = []
-        current_chunk = []
-        current_length = 0
-        
-        for sentence in sentences:
-            sentence_tokens = self.tokenizer(sentence, return_length=True)
-            if current_length + sentence_tokens['length'] > max_chunk_size:
-                if current_chunk:
-                    chunks.append(' '.join(current_chunk))
-                current_chunk = [sentence]
-                current_length = sentence_tokens['length']
-            else:
-                current_chunk.append(sentence)
-                current_length += sentence_tokens['length']
-        
-        if current_chunk:
-            chunks.append(' '.join(current_chunk))
-        
-        return chunks
+        if not text:
+            return []
+            
+        try:
+            sentences = nltk.sent_tokenize(text)
+            chunks = []
+            current_chunk = []
+            current_length = 0
+            
+            for sentence in sentences:
+                # Get token count for the sentence
+                tokens = self.tokenizer.encode(sentence)
+                sentence_length = len(tokens)
+                
+                if current_length + sentence_length > self.max_chunk_length:
+                    if current_chunk:
+                        chunks.append(' '.join(current_chunk))
+                    current_chunk = [sentence]
+                    current_length = sentence_length
+                else:
+                    current_chunk.append(sentence)
+                    current_length += sentence_length
+            
+            if current_chunk:
+                chunks.append(' '.join(current_chunk))
+            
+            return chunks
+            
+        except Exception as e:
+            print(f"Error in chunk_document: {str(e)}")
+            return [text] if text else []
 
 
 # Dependency to get the current user
@@ -268,20 +282,30 @@ def load_file(file_path):
     """Unified loader for different file types with enhanced error handling."""
     try:
         file_type = detect_file_type(file_path)
+        doc = None
+        
         if file_type == "pdf":
-            return load_pdf(file_path)
+            doc = load_pdf(file_path)
         elif file_type == "docx":
-            return load_docx(file_path)
+            doc = load_docx(file_path)
         elif file_type == "excel":
-            return load_excel(file_path)
-        elif file_type == "txt":  # This now handles .txt, .py, and .flow files
-            return load_text(file_path)
+            doc = load_excel(file_path)
+        elif file_type == "txt":  # This handles .txt, .py, and .flow files
+            doc = load_text(file_path)
         elif file_type == "md":
-            return load_markdown(file_path)
+            doc = load_markdown(file_path)
         elif file_type == "csv":
-            return load_csv(file_path)
-        else:
-            raise ValueError(f"Unsupported file type: {file_path}")
+            doc = load_csv(file_path)
+            
+        # Validate document structure
+        if doc and isinstance(doc, dict):
+            if not isinstance(doc.get('content', ''), str):
+                doc['content'] = str(doc['content'])
+            if not doc.get('metadata'):
+                doc['metadata'] = {}
+            return doc
+        return None
+        
     except Exception as e:
         print(f"Error in load_file for {file_path}: {str(e)}")
         return None
@@ -541,31 +565,44 @@ class SimpleRAG:
             metadatas = []
             
             for idx, doc in enumerate(self.documents):
+                if not isinstance(doc.get('content', ''), str):
+                    print(f"Skipping document {doc.get('source', 'unknown')}: invalid content type")
+                    continue
+                    
                 clean_text = self.document_processor.preprocess_document(doc['content'])
                 chunks = self.document_processor.chunk_document(clean_text)
+                
+                # Ensure chunks are strings
+                chunks = [str(chunk) for chunk in chunks if chunk]
                 
                 for chunk_idx, chunk in enumerate(chunks):
                     processed_texts.append(chunk)
                     metadatas.append({
                         "source": doc.get('source', ''),
-                        "doc_id": idx,
-                        "chunk_id": chunk_idx,
+                        "doc_id": f"doc_{idx}",
+                        "chunk_id": f"chunk_{chunk_idx}",
                         **doc.get('metadata', {})
                     })
             
-            self.vector_store = Chroma(
-                collection_name="documents",
-                embedding_function=self.embeddings
+            if not processed_texts:
+                print("No valid text chunks to process")
+                return False
+                
+            # Create a new Chroma collection
+            self.vector_store = Chroma.from_texts(
+                texts=processed_texts,
+                metadatas=metadatas,
+                embedding=self.embeddings,
+                collection_name="documents"
             )
             
-            self.vector_store.add_texts(
-                texts=processed_texts,
-                metadatas=metadatas
-            )
+            print(f"Successfully created vector store with {len(processed_texts)} chunks")
             return True
             
         except Exception as e:
             print(f"Error building vector database: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return False
         
     def add_documents(self, documents: List[str]):
