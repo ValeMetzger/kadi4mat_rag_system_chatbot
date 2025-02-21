@@ -440,11 +440,27 @@ def initialize_rag_system(token, progress=gr.Progress()):
             try:
                 response = manager.search.search_resources("record", per_page=100)
                 parsed = json.loads(response.content)
-                total_pages = parsed["_pagination"]["total_pages"]
+                
+                # Debug the API response
+                print("API Response:", parsed)
+                
+                if "data" in parsed:  # Some APIs use 'data' instead of 'items'
+                    items = parsed["data"]
+                    total_pages = parsed.get("meta", {}).get("total_pages", 1)
+                elif "_pagination" in parsed:
+                    items = parsed.get("items", [])
+                    total_pages = parsed["_pagination"]["total_pages"]
+                else:
+                    print("Unexpected API response format:", parsed)
+                    return "Failed to parse API response", None
+                
+                if not items:
+                    return "No records found", None
+                    
                 break
             except Exception as e:
                 if attempt == max_retries - 1:
-                    return f"Failed to initialize: Could not fetch records after {max_retries} attempts", None
+                    return f"Failed to initialize: Could not fetch records after {max_retries} attempts. Error: {str(e)}", None
                 print(f"Attempt {attempt + 1} failed, retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
         
@@ -460,51 +476,85 @@ def initialize_rag_system(token, progress=gr.Progress()):
                     page_endpoint = f"{manager.host}/api/records?page={page}&per_page=100"
                     response = manager.make_request(page_endpoint)
                     parsed = json.loads(response.content)
+                    
+                    if "data" in parsed:
+                        items = parsed["data"]
+                    else:
+                        items = parsed.get("items", [])
+                        
+                    if not items:
+                        print(f"No items found in page {page}")
+                        continue
+                        
                     break
                 except Exception as e:
                     if attempt == max_retries - 1:
-                        print(f"Skipping page {page} due to connection error")
+                        print(f"Skipping page {page} due to connection error: {str(e)}")
                         continue
                     time.sleep(retry_delay)
             
             # Process each record in the page
-            for item in parsed["items"]:
+            for item in items:
                 try:
-                    record = manager.record(identifier=item["identifier"])
+                    record_id = item.get("identifier") or item.get("id")
+                    if not record_id:
+                        print("Record missing identifier:", item)
+                        continue
+                        
+                    record = manager.record(identifier=record_id)
                     
                     # Get file list with retry
                     for attempt in range(max_retries):
                         try:
-                            file_list = record.get_filelist(page=1, per_page=100).json()["items"]
+                            response = record.get_filelist(page=1, per_page=100)
+                            file_list = response.json()
+                            
+                            if "data" in file_list:
+                                files = file_list["data"]
+                            else:
+                                files = file_list.get("items", [])
+                                
+                            if not files:
+                                print(f"No files found in record {record_id}")
+                                break
+                                
                             break
                         except Exception as e:
                             if attempt == max_retries - 1:
-                                print(f"Skipping record {item['identifier']} due to connection error")
+                                print(f"Skipping record {record_id} due to error: {str(e)}")
                                 continue
                             time.sleep(retry_delay)
                     
                     # Process each file
-                    for file_info in file_list:
-                        if file_info["name"].lower().endswith('.pdf'):
+                    for file_info in files:
+                        file_name = file_info.get("name")
+                        file_id = file_info.get("id")
+                        
+                        if not all([file_name, file_id]):
+                            print(f"Invalid file info in record {record_id}:", file_info)
+                            continue
+                            
+                        if file_name.lower().endswith('.pdf'):
                             try:
                                 with tempfile.TemporaryDirectory(prefix="tmp-kadichat-") as temp_dir:
-                                    temp_file_location = os.path.join(temp_dir, file_info["name"])
-                                    record.download_file(file_info["id"], temp_file_location)
+                                    temp_file_location = os.path.join(temp_dir, file_name)
+                                    record.download_file(file_id, temp_file_location)
                                     
                                     # Parse document and add to RAG
                                     docs = load_and_chunk_pdf(temp_file_location)
                                     for doc in docs:
                                         doc["metadata"].update({
-                                            "record_id": item["identifier"],
-                                            "file_name": file_info["name"]
+                                            "record_id": record_id,
+                                            "file_name": file_name
                                         })
                                     rag_system.add_documents(docs)
+                                    print(f"Successfully processed {file_name} from record {record_id}")
                             except Exception as e:
-                                print(f"Error processing file {file_info['name']}: {str(e)}")
+                                print(f"Error processing file {file_name}: {str(e)}")
                                 continue
                                 
                 except Exception as e:
-                    print(f"Error processing record {item['identifier']}: {str(e)}")
+                    print(f"Error processing record {record_id if 'record_id' in locals() else 'unknown'}: {str(e)}")
                     continue
         
         # Build vector database if we have documents
@@ -517,6 +567,7 @@ def initialize_rag_system(token, progress=gr.Progress()):
             return "No documents were processed successfully", None
             
     except Exception as e:
+        print("Initialization error:", str(e))
         return f"Failed to initialize RAG system: {str(e)}", None
 
 
