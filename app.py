@@ -657,6 +657,13 @@ with gr.Blocks() as main_demo:
 
     loading_status = gr.Markdown("Initializing system...")
 
+    # Add initialization load event here
+    main_demo.load(
+        fn=initialize_system,
+        inputs=None,
+        outputs=loading_status
+    )
+
     # Chat interface
     with gr.Tab("Chat"):
         chatbot = gr.Chatbot(height=600)
@@ -669,6 +676,25 @@ with gr.Blocks() as main_demo:
         with gr.Row():
             submit_btn = gr.Button("Submit")
             clear_btn = gr.Button("Clear Chat")
+
+        # Add chat functionality
+        txt_input.submit(
+            fn=process_chat,
+            inputs=[txt_input, chatbot, loading_state],
+            outputs=[chatbot, txt_input]
+        )
+        
+        submit_btn.click(
+            fn=process_chat,
+            inputs=[txt_input, chatbot, loading_state],
+            outputs=[chatbot, txt_input]
+        )
+        
+        clear_btn.click(
+            fn=lambda: ([], ""),
+            inputs=None,
+            outputs=[chatbot, txt_input]
+        )
 
 app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
 
@@ -685,13 +711,6 @@ async def initialize_system(request: gr.Request):
     except Exception as e:
         loading_state.value = False
         return f"System Status: Error - {str(e)}"
-
-# Add this to your Gradio interface
-main_demo.load(
-    fn=initialize_system,
-    inputs=None,
-    outputs=loading_status
-)
 
 if __name__ == "__main__":
     uvicorn.run(app, port=7860, host="0.0.0.0")
