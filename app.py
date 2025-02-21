@@ -100,6 +100,9 @@ embeddings_model = SentenceTransformer(
     "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
 )
 
+# Add these state variables at the global scope
+user_session_rag = gr.State(None)
+loading_state = gr.State(True)
 
 class DocumentProcessor:
     def __init__(self):
@@ -687,8 +690,9 @@ def handle_chat(message, history, loading_state):
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 app = gr.mount_gradio_app(app, login_demo, path="/main")
 
-# Move initialize_system function before the Gradio interface
+# Add this initialization function
 async def initialize_system(request: gr.Request):
+    """Initialize the RAG system for the current session."""
     try:
         user_token = request.request.session["user_access_token"]
         rag_system, total_chunks = await process_all_records_and_files(user_token)
@@ -702,13 +706,11 @@ async def initialize_system(request: gr.Request):
         loading_state.value = False
         return f"System Status: Error - {str(e)}"
 
-# Gradio interface
+# Update the main Gradio interface
 with gr.Blocks() as main_demo:
     # State variables
     _state_user_token = gr.State([])
-    user_session_rag = gr.State(None)
-    loading_state = gr.State(True)
-
+    
     with gr.Row():
         with gr.Column(scale=7):
             welcome_msg = gr.Markdown("Welcome to Chatbot!")
@@ -738,7 +740,20 @@ with gr.Blocks() as main_demo:
             submit_btn = gr.Button("Submit")
             clear_btn = gr.Button("Clear Chat")
 
-        # Add chat functionality
+        # Update chat functionality to check loading state
+        def process_chat(message, history, loading_state):
+            """Process chat messages and return responses."""
+            if loading_state:
+                return history + [(message, "Still loading documents. Please wait...")], ""
+            
+            # Get the RAG system from the state
+            rag_system = user_session_rag.value
+            
+            if not rag_system or not hasattr(rag_system, 'vector_store'):
+                return history + [(message, "RAG system not properly initialized. Please refresh the page.")], ""
+            
+            return chat_response(message, history, rag_system)
+
         txt_input.submit(
             fn=process_chat,
             inputs=[txt_input, chatbot, loading_state],
