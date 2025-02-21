@@ -382,7 +382,7 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
 def greet(request: gr.Request):
     """Show greeting message."""
 
-    return f"Welcome to Kadichat, you're logged in as: {request.username}"
+    return f"Welcome to the Kadichat RAG-System, you're logged in as: {request.username}"
 
 
 def get_files_in_record(record_id, user_token, top_k=10):
@@ -522,7 +522,7 @@ class EnhancedRAG:
         self.vector_store = Chroma(
             collection_name="kadi_records",
             embedding_function=self.embeddings,
-            persist_directory="./chroma_db"  # Add persistence
+            persist_directory="./chroma_db"
         )
         self.document_processor = DocumentProcessor()
 
@@ -533,7 +533,6 @@ class EnhancedRAG:
             metadatas = []
             
             for doc in documents:
-                # Simple preprocessing
                 text = self.document_processor.preprocess_document(doc['content'])
                 chunks = self.document_processor.chunk_document(text, max_chunk_size=512)
                 
@@ -554,54 +553,48 @@ class EnhancedRAG:
             return 0
 
     def get_relevant_context(self, query: str, k: int = 3) -> str:
-        """Get relevant context for query."""
         try:
-            results = self.vector_store.similarity_search_with_score(query, k=k*2)  # Get more candidates
-            return "\n".join(doc.page_content for doc, score in results if score < 1.0)[:1500]  # Stricter filtering
-            
+            results = self.vector_store.similarity_search_with_score(query, k=k*2)
+            contexts = []
+            for doc, score in results:
+                if score < 1.0:  # Stricter relevance threshold
+                    contexts.append(f"From {doc.metadata.get('source', 'unknown')}:\n{doc.page_content}")
+            return "\n\n".join(contexts) if contexts else ""
         except Exception as e:
             print(f"Error retrieving context: {str(e)}")
             return ""
 
 def chat_response(message: str, history: List[Tuple[str, str]], rag_system: EnhancedRAG) -> Tuple[List[Tuple[str, str]], str]:
-    """Generate chat response using RAG."""
     try:
-        # Get relevant context
         context = rag_system.get_relevant_context(message)
         
-        # Build a clearer prompt
-        if context:
-            prompt = f"""
-Context:
-{context}
+        prompt = f"""<s>[INST] You are a helpful assistant for answering questions about documents stored in Kadi4mat. 
+Always base your answers on the provided context. If no relevant context is available, say so directly.
+
+{f'Relevant context from documents:\n{context}\n' if context else 'No relevant context found in the documents.\n'}
 
 Question: {message}
 
-"""
-        else:
-            prompt = f"""
+Provide a clear, factual answer based only on the available context. [/INST]"""
 
-{message}"""
-
-        # Get response from LLM
         response = client.text_generation(
             prompt=prompt,
-            max_new_tokens=1024
+            max_new_tokens=512,
+            temperature=0.1,
+            top_p=0.5,
+            repetition_penalty=1.2
         )
         
-        # Improved response cleaning
         response = response.replace("<s>", "").replace("</s>", "")
         response = response.split("[/INST]")[-1].strip()
+        response = re.sub(r'={2,}.*?={2,}', '', response)
+        response = re.sub(r'\[.*?\]', '', response)
+        response = re.sub(r'`.*?`', '', response)
+        response = re.sub(r'\.{2,}.*', '.', response)
+        response = re.sub(r'\s{2,}', ' ', response)
         
-        # Additional cleaning
-        response = re.sub(r'={3,}.*?={3,}', '', response)  # Remove === sections
-        response = re.sub(r'\[.*?\]', '', response)  # Remove [...] sections
-        response = re.sub(r'\n\s*\n+', '\n\n', response)  # Clean up multiple newlines
-        response = response.strip()
-        
-        # Validate response
         if not response or len(response) < 10 or '=====' in response:
-            return history + [(message, "I apologize, but I couldn't generate a proper response. Please try asking your question again.")], ""
+            return history + [(message, "I apologize, but I couldn't generate a proper response. Please try rephrasing your question.")], ""
             
         return history + [(message, response)], ""
         
@@ -649,10 +642,9 @@ app = gr.mount_gradio_app(app, login_demo, path="/main")
 with gr.Blocks() as main_demo:
     # State variables
     _state_user_token = gr.State([])
-    user_session_rag = gr.State(None)  # Initialize as None instead of SimpleRAG()
+    user_session_rag = gr.State(None)
     loading_state = gr.State(True)
 
-    # Header with welcome message and logout button
     with gr.Row():
         with gr.Column(scale=7):
             welcome_msg = gr.Markdown("Welcome to Chatbot!")
@@ -662,94 +654,18 @@ with gr.Blocks() as main_demo:
 
     loading_status = gr.Markdown("Initializing system...")
 
-    async def initialize_system(request: gr.Request):
-        try:
-            user_token = request.request.session["user_access_token"]
-            rag_system, num_chunks = await process_all_records_and_files(user_token)
-            
-            # Update the global state
-            user_session_rag.value = rag_system
-            loading_state.value = False
-            
-            # Show both document count and chunk count
-            doc_count = len(rag_system.vector_store._collection.count())  # Get actual document count
-            return f"System Status: Ready! Processed {doc_count} documents into {num_chunks} searchable chunks."
-        except Exception as e:
-            loading_state.value = False
-            return f"System Status: Error - {str(e)}"
-
-    # Update loading status when initialization completes
-    main_demo.load(
-        fn=initialize_system,
-        inputs=None,
-        outputs=loading_status,
-    )
-
-    # Main chat interface
+    # Chat interface
     with gr.Tab("Chat"):
-        with gr.Row():
-            # Chat display
-            with gr.Column(scale=7):
-                chatbot = gr.Chatbot(height=600)
-                
-            # System status (optional)
-            with gr.Column(scale=3):
-                system_status = gr.Markdown("System Status: Initializing...")
-
-        # Input area
-        with gr.Row():
-            txt_input = gr.Textbox(
-                show_label=False,
-                placeholder="Type your question here...",
-                lines=2,
-                scale=8
-            )
-            
-        # Buttons
-        with gr.Row():
-            submit_btn = gr.Button("Submit", scale=2)
-            refresh_btn = gr.Button("Clear Chat", scale=1, variant="secondary")
-
-        # Example questions
-        gr.Examples(
-            examples=[
-                ["Summarize the contents of my records."],
-                ["What are the main topics discussed in my documents?"],
-                ["How many records do I have in total?"],
-            ],
-            inputs=[txt_input]
-        )
-
-        # Define chat functionality
-        txt_input.submit(
-            fn=process_chat,
-            inputs=[txt_input, chatbot, loading_state],
-            outputs=[chatbot, txt_input]
+        chatbot = gr.Chatbot(height=600)
+        txt_input = gr.Textbox(
+            show_label=False,
+            placeholder="Type your question here...",
+            lines=2
         )
         
-        submit_btn.click(
-            fn=process_chat,
-            inputs=[txt_input, chatbot, loading_state],
-            outputs=[chatbot, txt_input]
-        )
-        
-        refresh_btn.click(
-            fn=lambda: ([], ""),
-            outputs=[chatbot, txt_input]
-        )
-
-        # Update system status periodically
-        def update_status(loading_state):
-            if loading_state:
-                return "System Status: Loading documents..."
-            return "System Status: Ready"
-
-        main_demo.load(
-            fn=update_status,
-            inputs=[loading_state],
-            outputs=[system_status],
-            every=1
-        )
+        with gr.Row():
+            submit_btn = gr.Button("Submit")
+            clear_btn = gr.Button("Clear Chat")
 
 app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
 
