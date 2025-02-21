@@ -571,18 +571,17 @@ def chat_response(message: str, history: List[Tuple[str, str]], rag_system: Enha
         
         # Build a clearer prompt
         if context:
-            prompt = f"""<s>[INST] You are a helpful assistant answering questions about documents. Use the following context to answer the question, but only if it's relevant. If the context doesn't help answer the question, just answer naturally.
-
+            prompt = f"""
 Context:
 {context}
 
 Question: {message}
 
-Please provide a clear, direct answer. [/INST]"""
+"""
         else:
-            prompt = f"""<s>[INST] You are a helpful assistant. Please answer this question:
+            prompt = f"""
 
-{message} [/INST]"""
+{message}"""
 
         # Get response from LLM
         response = client.text_generation(
