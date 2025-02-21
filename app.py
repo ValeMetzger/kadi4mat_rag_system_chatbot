@@ -641,6 +641,21 @@ def handle_chat(message, history, loading_state):
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 app = gr.mount_gradio_app(app, login_demo, path="/main")
 
+# Move initialize_system function before the Gradio interface
+async def initialize_system(request: gr.Request):
+    try:
+        user_token = request.request.session["user_access_token"]
+        rag_system, total_chunks = await process_all_records_and_files(user_token)
+        
+        # Update the global state
+        user_session_rag.value = rag_system
+        loading_state.value = False
+        
+        return f"System Status: Ready! Processed {total_chunks} document chunks."
+    except Exception as e:
+        loading_state.value = False
+        return f"System Status: Error - {str(e)}"
+
 # Gradio interface
 with gr.Blocks() as main_demo:
     # State variables
@@ -697,20 +712,6 @@ with gr.Blocks() as main_demo:
         )
 
 app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
-
-async def initialize_system(request: gr.Request):
-    try:
-        user_token = request.request.session["user_access_token"]
-        rag_system, total_chunks = await process_all_records_and_files(user_token)
-        
-        # Update the global state
-        user_session_rag.value = rag_system
-        loading_state.value = False
-        
-        return f"System Status: Ready! Processed {total_chunks} document chunks."
-    except Exception as e:
-        loading_state.value = False
-        return f"System Status: Error - {str(e)}"
 
 if __name__ == "__main__":
     uvicorn.run(app, port=7860, host="0.0.0.0")
