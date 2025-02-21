@@ -33,7 +33,7 @@ from authlib.integrations.starlette_client import OAuth, OAuthError
 from fastapi import Request
 from kadi_apy import KadiManager
 from requests.compat import urljoin
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 import mimetypes
@@ -797,21 +797,6 @@ def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
     return "Ready to chat", rag
 
 
-def preprocess_response(response: str) -> str:
-    """Preprocesses the response to make it more polished."""
-
-    # Placeholder for preprocessing
-
-    # response = response.strip()
-    # response = response.replace("\n\n", "\n")
-    # response = response.replace(" ,", ",")
-    # response = response.replace(" .", ".")
-    # response = " ".join(response.split())
-    # if not any(word in response.lower() for word in ["sorry", "apologize", "empathy"]):
-    #     response = "I'm here to help. " + response
-    return response
-
-
 def clean_response(response: str) -> str:
     """Clean up model response while preserving content."""
     try:
@@ -823,58 +808,52 @@ def clean_response(response: str) -> str:
         response = response.replace("<s>", "").replace("</s>", "")
         response = response.replace("[INST]", "").strip()
         
-        # Only clean up excessive whitespace
-        response = "\n".join(line.strip() for line in response.split("\n"))
+        # Clean up repetitive text patterns
+        lines = response.split('\n')
+        cleaned_lines = []
+        seen = set()
+        for line in lines:
+            line = line.strip()
+            if line and line not in seen:
+                seen.add(line)
+                cleaned_lines.append(line)
+        
+        response = '\n'.join(cleaned_lines)
         
         # Return the response if it has any content
         if response.strip():
             return response
-        return "I apologize, but I couldn't generate a response. Please try again."
+        return "I apologize, but I couldn't generate a proper response. Please try again."
         
     except Exception as e:
         print(f"Error cleaning response: {str(e)}")
         return str(e)
 
 
-def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
+def chat_response(message, history, loading_state):
+    """Handle chat responses with better error handling and response cleaning."""
     try:
-        # Get context but limit the number of chunks to avoid overwhelming the LLM
-        context = user_session_rag.get_context_for_query(message, k=3)  # Reduced from default 5
+        if loading_state:
+            return history + [(message, "Still loading documents. Please wait...")], ""
+            
+        if not user_session_rag or not user_session_rag.vector_store:
+            return history + [(message, "RAG system not properly initialized. Please refresh the page.")], ""
+            
+        context = user_session_rag.get_context_for_query(message, k=3)
         
-        # Build a more balanced prompt
-        system_prompt = """You are a knowledgeable AI assistant who can draw from both general knowledge and specific document references. 
-When answering:
-1. Start with your general understanding of the topic
-2. Incorporate relevant information from provided documents when applicable
-3. Clearly indicate when you're referencing specific documents
-4. Feel free to expand beyond the documents using your general knowledge
-5. If the documents contain incorrect or outdated information, rely on your training instead"""
-
-        # Separate general query from document-specific queries
-        if any(keyword in message.lower() for keyword in ['document', 'file', 'record', 'content']):
-            # Document-focused query
-            if context:
-                context_prompt = f"\nRelevant document excerpts:\n{context}\n\nPlease focus on these documents while incorporating general knowledge when helpful."
-            else:
-                context_prompt = "\nNo directly relevant documents found, but I'll answer based on my general knowledge and any related information in the available documents."
-        else:
-            # General query
-            if context:
-                context_prompt = f"\nI also found some potentially relevant information in your documents that I can incorporate if helpful:\n{context}"
-            else:
-                context_prompt = ""
-
-        prompt = f"<s>[INST] {system_prompt}\n\nUser question: {message}\n{context_prompt} [/INST]"
-
-        # Adjust generation parameters for more balanced responses
+        # Build a more focused prompt
+        system_prompt = """You are a helpful AI assistant. Please provide clear, concise answers based on the available context and your knowledge. If using information from the documents, cite the source."""
+        
+        prompt = f"<s>[INST] {system_prompt}\n\nUser question: {message}\n\nContext from documents:\n{context} [/INST]"
+        
         response = client.text_generation(
             prompt=prompt,
-            max_new_tokens=2048,
-            temperature=0.7,  # Balanced between creativity and accuracy
+            max_new_tokens=1024,  # Reduced to prevent overly long responses
+            temperature=0.7,
             top_p=0.9,
-            repetition_penalty=1.05,
+            repetition_penalty=1.2,  # Increased to prevent repetition
             do_sample=True,
-            stop_sequences=["</s>", "[INST]"]
+            stop_sequences=["</s>", "[INST]", "User:"]
         )
         
         cleaned_response = clean_response(response)
@@ -893,8 +872,8 @@ app = gr.mount_gradio_app(app, login_demo, path="/main")
 with gr.Blocks() as main_demo:
     # State variables
     _state_user_token = gr.State([])
-    user_session_rag = gr.State(SimpleRAG())
-    loading_state = gr.State(True)  # Track loading state
+    user_session_rag = gr.State(None)  # Initialize as None instead of SimpleRAG()
+    loading_state = gr.State(True)
 
     # Header with welcome message and logout button
     with gr.Row():
@@ -904,18 +883,17 @@ with gr.Blocks() as main_demo:
         with gr.Column(scale=1):
             gr.Button("Logout", link="/logout")
 
-    loading_status = gr.Markdown("Initializing system and loading records...")
-    loading_state = gr.State(True)  # Start as True (loading)
+    loading_status = gr.Markdown("Initializing system...")
 
     async def initialize_system(request: gr.Request):
         try:
             user_token = request.request.session["user_access_token"]
             num_docs = await process_all_records_and_files(user_token)
             loading_state.value = False
-            return f"Ready to chat! Loaded {num_docs} documents from your records."
+            return f"System Status: Ready! Loaded {num_docs} documents."
         except Exception as e:
             loading_state.value = False
-            return f"Error loading records: {str(e)}"
+            return f"System Status: Error - {str(e)}"
 
     # Update loading status when initialization completes
     main_demo.load(
@@ -964,7 +942,7 @@ with gr.Blocks() as main_demo:
         def chat_response(message, history, loading_state):
             if loading_state:
                 return history + [(message, "Still loading documents. Please wait...")], ""
-            return respond(message, history, user_session_rag)
+            return chat_response(message, history, loading_state)
 
         # Button actions
         txt_input.submit(
