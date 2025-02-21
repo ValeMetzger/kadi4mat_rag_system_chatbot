@@ -33,7 +33,7 @@ from authlib.integrations.starlette_client import OAuth, OAuthError
 from fastapi import Request
 from kadi_apy import KadiManager
 from requests.compat import urljoin
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 import mimetypes
@@ -499,8 +499,15 @@ class SimpleRAG:
         self.vector_store = None
         self.documents = []
     
-    def search_documents(self, query: str, k: int = 3) -> List[str]:
-        """Search for relevant document chunks."""
+    def search_documents(self, query: str, k: int = 3, doc_filter: Optional[List[str]] = None) -> List[str]:
+        """
+        Search for relevant document chunks.
+        
+        Args:
+            query: The search query
+            k: Number of results to return
+            doc_filter: Optional list of document IDs or names to filter by
+        """
         try:
             if not self.vector_store:
                 print("Warning: Vector store not initialized")
@@ -525,11 +532,22 @@ class SimpleRAG:
                 print(f"Content preview: {doc.page_content[:200]}...")
                 print(f"Metadata: {doc.metadata}")
                 
-                # Adjust threshold to be more lenient
+                # Check if document matches filter criteria
+                if doc_filter:
+                    doc_id = doc.metadata.get('source', '')
+                    if not any(f in doc_id for f in doc_filter):
+                        print(f"Skipped due to document filter")
+                        continue
+                
+                # Apply score threshold
                 if score < 2.0:
                     doc_id = doc.metadata.get('doc_id')
                     if doc_id not in seen_doc_ids:
-                        filtered_results.append(doc.page_content)
+                        filtered_results.append({
+                            'content': doc.page_content,
+                            'source': doc.metadata.get('source', 'unknown'),
+                            'score': score
+                        })
                         seen_doc_ids.add(doc_id)
                         print(f"Added to filtered results (doc_id: {doc_id})")
                 else:
@@ -544,19 +562,29 @@ class SimpleRAG:
             print(traceback.format_exc())
             return []
 
-    def get_context_for_query(self, query: str) -> str:
-        """Get formatted context for a query."""
+    def get_context_for_query(self, query: str, doc_filter: Optional[List[str]] = None) -> str:
+        """
+        Get formatted context for a query, optionally filtered by specific documents.
+        """
         try:
-            relevant_chunks = self.search_documents(query)
+            relevant_chunks = self.search_documents(query, doc_filter=doc_filter)
             if not relevant_chunks:
                 return ""
             
-            # Format context with clear section breaks
-            context = "\n---\n".join(relevant_chunks)
+            # Format context with source information
+            formatted_chunks = []
+            for chunk in relevant_chunks:
+                formatted_chunks.append(f"""
+Source: {chunk['source']}
+---
+{chunk['content']}
+""")
+            
+            context = "\n\n".join(formatted_chunks)
             
             # Limit context length if needed
-            if len(context) > 2000:
-                context = context[:1997] + "..."
+            if len(context) > 3000:  # Increased limit
+                context = context[:2997] + "..."
             
             return context
             
@@ -805,38 +833,64 @@ def clean_response(response: str) -> str:
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     try:
+        # Parse if user wants specific documents or general knowledge
+        use_general_knowledge = any(phrase in message.lower() for phrase in [
+            "what do you know about", "tell me about", "explain", "how does",
+            "what is", "define", "describe"
+        ])
+        
         # Get context from the RAG system
         context = user_session_rag.get_context_for_query(message)
         
-        if not context:
-            return history + [(message, "I couldn't find any relevant information in the documents. Could you please rephrase your question or ask about something else?")], ""
+        # Determine response type based on context and query
+        if not context and not use_general_knowledge:
+            return history + [(message, "I couldn't find relevant information in the documents. Would you like me to share what I know about this topic in general?")], ""
         
-        # More open-ended prompt that encourages detailed responses
-        prompt = f"""<s>[INST] You are a knowledgeable assistant with expertise in analyzing documents. Use the following context to provide a detailed response.
+        # Construct base prompt with system context
+        base_prompt = """<s>[INST] You are a knowledgeable AI assistant with expertise in many fields, particularly in scientific and technical domains. You have both general knowledge and access to specific documents.
 
-Context from the documents:
+Your capabilities:
+1. You can share your general knowledge when appropriate
+2. You can analyze and reference specific documents when needed
+3. You can combine both sources of information when useful
+
+Current conversation context:
+- If asked about documents, focus on their content
+- If asked general questions, you can share your broader knowledge
+- Always mention when you're using information from documents vs general knowledge
+
+"""
+        
+        # Add document context if available
+        if context:
+            base_prompt += f"""
+Relevant document content:
 {context}
 
-Question: {message}
-
-Important Instructions:
-- Provide a comprehensive answer using the information from the context
-- Feel free to structure your response in paragraphs or sections if needed
-- Include relevant details and examples from the documents
-- If the context is partial or unclear, explain what you can understand from it
-- You can be detailed and thorough in your response
-
-Please provide your response: [/INST]"""
+"""
         
-        # More generous generation parameters
+        # Add the user's question and response guidance
+        base_prompt += f"""
+User Question: {message}
+
+Please provide a response that:
+- Clearly indicates whether you're using document information or general knowledge
+- Is natural and conversational in tone
+- Includes relevant details and examples
+- Maintains academic accuracy
+- Uses formatting for readability when appropriate
+
+Your response: [/INST]"""
+
+        # Generate response with more flexible parameters
         response = client.text_generation(
-            prompt,
-            max_new_tokens=1024,  # Allow longer responses
-            temperature=0.7,  # Keep some creativity
+            prompt=base_prompt,
+            max_new_tokens=1500,
+            temperature=0.7,
             top_p=0.9,
-            repetition_penalty=1.1,  # Slightly reduced to allow more natural repetition
+            repetition_penalty=1.1,
             do_sample=True,
-            stop_sequences=["</s>"]  # Only stop at end of sequence
+            stop_sequences=["</s>"]
         )
         
         cleaned_response = clean_response(response)
