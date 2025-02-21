@@ -49,6 +49,7 @@ import re
 import nltk
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
+import unicodedata
 
 # Kadi OAuth settings
 load_dotenv()
@@ -108,58 +109,85 @@ embeddings_model = SentenceTransformer(
 class DocumentProcessor:
     def __init__(self):
         self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-        try:
-            import nltk
-            nltk.download('punkt', quiet=True)
-            # Use sent_tokenize directly instead of loading the tokenizer
-            self.nltk_tokenizer = nltk.sent_tokenize
-        except Exception as e:
-            print(f"Error initializing NLTK: {str(e)}")
-            self.nltk_tokenizer = None
+        nltk.download('punkt', quiet=True)
+        self.nltk_tokenizer = nltk.sent_tokenize
     
     def preprocess_document(self, text: str) -> str:
-        """Clean and preprocess document text."""
-        text = re.sub(r'[^\w\s.,!?-]', ' ', text)
-        text = ' '.join(text.split())
-        return text
+        """Enhanced document preprocessing."""
+        # Remove excessive whitespace while preserving paragraph breaks
+        text = re.sub(r'\n\s*\n', '\n\n', text)
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Normalize punctuation
+        text = re.sub(r'[''´`]', "'", text)
+        text = re.sub(r'["""]', '"', text)
+        
+        # Remove non-printable characters while preserving useful Unicode
+        text = ''.join(char for char in text if unicodedata.category(char)[0] != 'C')
+        
+        return text.strip()
     
-    def chunk_document(self, text: str, max_chunk_size: int = 500) -> List[str]:
-        """Split document into semantic chunks."""
-        try:
-            if self.nltk_tokenizer:
-                sentences = self.nltk_tokenizer(text)
-            else:
-                # Fallback to basic sentence splitting
-                sentences = re.split('[.!?]+', text)
-                sentences = [s.strip() for s in sentences if s.strip()]
-            
-            chunks = []
-            current_chunk = []
-            current_length = 0
-            
-            for sentence in sentences:
-                # Get token count for the sentence
-                tokens = self.tokenizer.encode(sentence)
-                sentence_length = len(tokens)
+    def chunk_document(self, text: str, max_chunk_size: int = 512, min_chunk_size: int = 100) -> List[dict]:
+        """Improved semantic chunking with metadata."""
+        chunks = []
+        paragraphs = text.split('\n\n')
+        current_chunk = []
+        current_length = 0
+        
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
                 
-                if current_length + sentence_length > max_chunk_size:
-                    if current_chunk:
-                        chunks.append(' '.join(current_chunk))
-                    current_chunk = [sentence]
-                    current_length = sentence_length
-                else:
-                    current_chunk.append(sentence)
-                    current_length += sentence_length
+            # Get paragraph tokens
+            tokens = self.tokenizer.encode(para)
+            para_length = len(tokens)
             
-            if current_chunk:
-                chunks.append(' '.join(current_chunk))
-            
-            return chunks
-            
-        except Exception as e:
-            print(f"Error in chunk_document: {str(e)}")
-            # Return single chunk if chunking fails
-            return [text]
+            # If paragraph is too long, split into sentences
+            if para_length > max_chunk_size:
+                sentences = self.nltk_tokenizer(para)
+                for sent in sentences:
+                    sent_tokens = self.tokenizer.encode(sent)
+                    sent_length = len(sent_tokens)
+                    
+                    if current_length + sent_length > max_chunk_size and current_chunk:
+                        # Store current chunk
+                        chunk_text = ' '.join(current_chunk)
+                        if len(self.tokenizer.encode(chunk_text)) >= min_chunk_size:
+                            chunks.append({
+                                'text': chunk_text,
+                                'token_count': current_length
+                            })
+                        current_chunk = []
+                        current_length = 0
+                    
+                    current_chunk.append(sent)
+                    current_length += sent_length
+            else:
+                # Handle paragraph as a unit if possible
+                if current_length + para_length > max_chunk_size and current_chunk:
+                    chunk_text = ' '.join(current_chunk)
+                    if len(self.tokenizer.encode(chunk_text)) >= min_chunk_size:
+                        chunks.append({
+                            'text': chunk_text,
+                            'token_count': current_length
+                        })
+                    current_chunk = []
+                    current_length = 0
+                
+                current_chunk.append(para)
+                current_length += para_length
+        
+        # Handle remaining text
+        if current_chunk:
+            chunk_text = ' '.join(current_chunk)
+            if len(self.tokenizer.encode(chunk_text)) >= min_chunk_size:
+                chunks.append({
+                    'text': chunk_text,
+                    'token_count': current_length
+                })
+        
+        return chunks
 
 
 # Dependency to get the current user
@@ -565,8 +593,6 @@ Source: {chunk['source']}
     def build_vector_db(self):
         """Initialize or rebuild the vector database with current documents."""
         try:
-            from langchain_community.vectorstores import Chroma
-            
             print("\nStarting vector database build...")
             print(f"Number of documents to process: {len(self.documents)}")
             
@@ -679,7 +705,7 @@ Source: {chunk['source']}
 
 
 
-def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
+def chunk_text(text, chunk_size=2048, overlap_size=512, separators=["\n\n", "\n"]):
     """Chunk text into pieces of specified size with overlap, considering separators."""
 
     # Split the text by the separators
@@ -803,51 +829,50 @@ def clean_response(response: str) -> str:
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     try:
-        # Get context from RAG system but don't make it mandatory
-        context = user_session_rag.get_context_for_query(message)
+        # Get context but limit the number of chunks to avoid overwhelming the LLM
+        context = user_session_rag.get_context_for_query(message, k=3)  # Reduced from default 5
         
-        # Build prompt parts separately to avoid f-string backslash issues
-        prompt_start = "<s>[INST] You are a helpful AI assistant having a natural conversation. You have broad knowledge and can discuss any topic.\n\n"
-        
-        context_part = ""
-        if context:
-            context_part = f"I have access to some relevant documents that might be helpful:\n\n{context}\n\n"
-        
-        question_part = f"The user asks: {message}\n\n"
-        
-        instructions = """Feel free to:
-- Answer naturally and conversationally
-- Use your general knowledge
-- Reference the documents when relevant
-- Explore related topics
-- Be detailed and thorough
-- Structure your response in a clear way
+        # Build a more balanced prompt
+        system_prompt = """You are a knowledgeable AI assistant who can draw from both general knowledge and specific document references. 
+When answering:
+1. Start with your general understanding of the topic
+2. Incorporate relevant information from provided documents when applicable
+3. Clearly indicate when you're referencing specific documents
+4. Feel free to expand beyond the documents using your general knowledge
+5. If the documents contain incorrect or outdated information, rely on your training instead"""
 
-Just be helpful and natural in your response."""
-        
-        # Combine all parts
-        prompt = prompt_start + context_part + question_part + instructions + " [/INST]"
+        # Separate general query from document-specific queries
+        if any(keyword in message.lower() for keyword in ['document', 'file', 'record', 'content']):
+            # Document-focused query
+            if context:
+                context_prompt = f"\nRelevant document excerpts:\n{context}\n\nPlease focus on these documents while incorporating general knowledge when helpful."
+            else:
+                context_prompt = "\nNo directly relevant documents found, but I'll answer based on my general knowledge and any related information in the available documents."
+        else:
+            # General query
+            if context:
+                context_prompt = f"\nI also found some potentially relevant information in your documents that I can incorporate if helpful:\n{context}"
+            else:
+                context_prompt = ""
 
-        # More permissive generation parameters
+        prompt = f"<s>[INST] {system_prompt}\n\nUser question: {message}\n{context_prompt} [/INST]"
+
+        # Adjust generation parameters for more balanced responses
         response = client.text_generation(
             prompt=prompt,
             max_new_tokens=2048,
-            temperature=0.9,  # Increased creativity
-            top_p=0.95,
-            repetition_penalty=1.03,  # Very light repetition penalty
+            temperature=0.7,  # Balanced between creativity and accuracy
+            top_p=0.9,
+            repetition_penalty=1.05,
             do_sample=True,
-            stop_sequences=["</s>"]
+            stop_sequences=["</s>", "[INST]"]
         )
         
-        # Minimal cleaning to preserve response structure
-        cleaned_response = response.split("[/INST]")[-1].strip()
-        if not cleaned_response:
-            return history + [(message, "I apologize, but I couldn't generate a response. Please try again.")], ""
-            
+        cleaned_response = clean_response(response)
         return history + [(message, cleaned_response)], ""
         
     except Exception as e:
-        error_msg = f"Error: {str(e)}"
+        error_msg = f"Error generating response: {str(e)}"
         print(error_msg)
         return history + [(message, error_msg)], ""
 
