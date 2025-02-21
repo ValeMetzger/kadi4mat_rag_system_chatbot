@@ -90,10 +90,7 @@ oauth.register(
 )
 
 # Global LLM client
-client = InferenceClient(
-    model="meta-llama/Meta-Llama-3-8B-Instruct",
-    token=huggingfacehub_api_token
-)
+client = InferenceClient("meta-llama/Meta-Llama-3-8B-Instruct")
 
 # Mixed-usage of huggingface client and local model for showing 2 possibilities
 embeddings_client = InferenceClient(
@@ -294,23 +291,34 @@ def load_csv(file_path):
     text = df.to_string(index=False)
     return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "csv"}}
 
-def load_file(file_path):
-    """Unified loader for different file types."""
+def load_file(file_path: str) -> Dict:
+    """Load and process a file."""
     file_type = detect_file_type(file_path)
-    if file_type == "pdf":
-        return load_pdf(file_path)
-    elif file_type == "docx":
-        return load_docx(file_path)
-    elif file_type == "excel":
-        return load_excel(file_path)
-    elif file_type == "txt":
-        return load_text(file_path)
-    elif file_type == "md":
-        return load_markdown(file_path)
-    elif file_type == "csv":
-        return load_csv(file_path)
-    else:
-        raise ValueError(f"Unsupported file type: {file_path}")
+    
+    try:
+        if file_type == "pdf":
+            with open(file_path, 'rb') as file:
+                pdf = PdfReader(file)
+                text = ""
+                for page in pdf.pages:
+                    text += page.extract_text()
+                return {"content": text, "source": os.path.basename(file_path)}
+                
+        elif file_type == "docx":
+            doc = DocxReader(file_path)
+            text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+            return {"content": text, "source": os.path.basename(file_path)}
+            
+        elif file_type in ["txt", "md"]:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                return {"content": file.read(), "source": os.path.basename(file_path)}
+                
+        else:
+            raise ValueError(f"Unsupported file type: {file_type}")
+            
+    except Exception as e:
+        print(f"Error loading file {file_path}: {str(e)}")
+        return {"content": "", "source": os.path.basename(file_path)}
 
 def detect_file_type(file_path):
     """Detect file type using mimetypes and file extension."""
@@ -430,41 +438,32 @@ def get_files_in_record(record_id, user_token, top_k=10):
     )
 
 
-def get_all_records(user_token):
+def get_all_records(user_token) -> List[str]:
     """Get all record list in Kadi."""
-
     if not user_token:
         return []
 
     manager = KadiManager(instance=instance, host=host, pat=user_token)
-
+    
     host_api = manager.host if manager.host.endswith("/") else manager.host + "/"
     searched_resource = "records"
-    endpoint = urljoin(
-        host_api, searched_resource
-    )  # e.g https://demo-kadi4mat.iam.kit.edu/api/" + "records"
+    endpoint = urljoin(host_api, searched_resource)
 
     response = manager.search.search_resources("record", per_page=100)
     parsed = json.loads(response.content)
-
+    
     total_pages = parsed["_pagination"]["total_pages"]
-
-    def get_page_records(parsed_content):
-        item_identifiers = []
-        items = parsed_content["items"]
-        for item in items:
-            item_identifiers.append(item["identifier"])
-
-        return item_identifiers
-
+    
     all_records_identifiers = []
     for page in range(1, total_pages + 1):
         page_endpoint = endpoint + f"?page={page}&per_page=100"
         response = manager.make_request(page_endpoint)
         parsed = json.loads(response.content)
-        all_records_identifiers.extend(get_page_records(parsed))
+        all_records_identifiers.extend([
+            item["identifier"] for item in parsed["items"]
+        ])
 
-    return all_records_identifiers
+    return all_records_identifiers  # Return list of IDs instead of Dropdown
 
 
 def _init_user_token(request: gr.Request):
@@ -566,37 +565,38 @@ class EnhancedRAG:
 
 def chat_response(message: str, history: List[Tuple[str, str]], rag_system: EnhancedRAG) -> Tuple[List[Tuple[str, str]], str]:
     try:
-        context = rag_system.get_relevant_context(message)
+        # Get relevant context with more results
+        context = rag_system.get_relevant_context(message, k=5)
         
-        # Split the prompt into parts to avoid f-string issues with backslashes
-        system_instruction = "<s>[INST] You are a helpful assistant for answering questions about documents stored in Kadi4mat. Always base your answers on the provided context. If no relevant context is available, say so directly.\n\n"
-        
-        context_section = f"Relevant context from documents:\n{context}\n\n" if context else "No relevant context found in the documents.\n\n"
-        
-        question_section = f"Question: {message}\n\n"
-        
-        final_instruction = "Provide a clear, factual answer based only on the available context. [/INST]"
-        
-        # Combine all parts
-        prompt = system_instruction + context_section + question_section + final_instruction
+        # Build prompt
+        prompt = f"""<s>[INST] You are a helpful assistant for answering questions about documents stored in Kadi4mat. 
+Base your answers only on the following context. If the context doesn't contain relevant information, say so clearly.
 
+Context:
+{context}
+
+Question: {message}
+
+Provide a clear, factual answer using only the information from the context above. If the context doesn't contain relevant information, say "I don't have enough information in the provided context to answer this question." [/INST]"""
+
+        # Get response with stricter parameters
         response = client.text_generation(
             prompt=prompt,
             max_new_tokens=512,
             temperature=0.1,
             top_p=0.5,
-            repetition_penalty=1.2
+            repetition_penalty=1.2,
+            do_sample=True
         )
         
+        # Clean response
         response = response.replace("<s>", "").replace("</s>", "")
         response = response.split("[/INST]")[-1].strip()
-        response = re.sub(r'={2,}.*?={2,}', '', response)
-        response = re.sub(r'\[.*?\]', '', response)
-        response = re.sub(r'`.*?`', '', response)
-        response = re.sub(r'\.{2,}.*', '.', response)
+        response = re.sub(r'[=\[\]`]+.*?[=\[\]`]+', '', response)
+        response = re.sub(r'\d+\.\s*\d+\.', '', response)
         response = re.sub(r'\s{2,}', ' ', response)
         
-        if not response or len(response) < 10 or '=====' in response:
+        if not response or len(response) < 10 or any(x in response for x in ['=====', '```', '[[[']):
             return history + [(message, "I apologize, but I couldn't generate a proper response. Please try rephrasing your question.")], ""
             
         return history + [(message, response)], ""
