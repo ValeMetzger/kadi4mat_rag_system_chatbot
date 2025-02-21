@@ -18,6 +18,7 @@ from requests.compat import urljoin
 from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
+import time
 
 # Kadi OAuth settings
 load_dotenv()
@@ -427,61 +428,96 @@ def initialize_rag_system(token, progress=gr.Progress()):
     # Create connection to kadi
     manager = KadiManager(instance=instance, host=host, pat=token)
     
-    # Get all records
-    host_api = manager.host if manager.host.endswith("/") else manager.host + "/"
-    searched_resource = "records"
-    endpoint = urljoin(host_api, searched_resource)
-    
-    response = manager.search.search_resources("record", per_page=100)
-    parsed = json.loads(response.content)
-    total_pages = parsed["_pagination"]["total_pages"]
-    
-    progress(0.1, desc="Collecting records...")
-    
     # Initialize RAG
     rag_system = SimpleRAG()
     
-    # Process each record
-    for page in range(1, total_pages + 1):
-        progress(0.1 + (0.4 * page/total_pages), desc=f"Processing records page {page}/{total_pages}")
+    try:
+        # Get all records with retry
+        max_retries = 3
+        retry_delay = 2  # seconds
         
-        page_endpoint = endpoint + f"?page={page}&per_page=100"
-        response = manager.make_request(page_endpoint)
-        parsed = json.loads(response.content)
+        for attempt in range(max_retries):
+            try:
+                response = manager.search.search_resources("record", per_page=100)
+                parsed = json.loads(response.content)
+                total_pages = parsed["_pagination"]["total_pages"]
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    return f"Failed to initialize: Could not fetch records after {max_retries} attempts", None
+                print(f"Attempt {attempt + 1} failed, retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
         
-        for item in parsed["items"]:
-            record = manager.record(identifier=item["identifier"])
-            file_num = record.get_number_files()
+        progress(0.1, desc="Collecting records...")
+        
+        # Process each record with retry logic
+        for page in range(1, total_pages + 1):
+            progress(0.1 + (0.4 * page/total_pages), desc=f"Processing records page {page}/{total_pages}")
             
-            # Get all files in the record
-            for p in range(1, (file_num // 100) + 2):
-                files = record.get_filelist(page=p, per_page=100).json()["items"]
-                
-                # Process each file
-                for file_info in files:
-                    file_id = file_info["id"]
-                    file_name = file_info["name"]
+            # Get page of records
+            for attempt in range(max_retries):
+                try:
+                    page_endpoint = f"{manager.host}/api/records?page={page}&per_page=100"
+                    response = manager.make_request(page_endpoint)
+                    parsed = json.loads(response.content)
+                    break
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        print(f"Skipping page {page} due to connection error")
+                        continue
+                    time.sleep(retry_delay)
+            
+            # Process each record in the page
+            for item in parsed["items"]:
+                try:
+                    record = manager.record(identifier=item["identifier"])
                     
-                    if file_name.lower().endswith('.pdf'):
-                        with tempfile.TemporaryDirectory(prefix="tmp-kadichat-") as temp_dir:
-                            temp_file_location = os.path.join(temp_dir, file_name)
-                            record.download_file(file_id, temp_file_location)
-                            
-                            # Parse document and add to RAG
-                            docs = load_and_chunk_pdf(temp_file_location)
-                            # Add record metadata to each chunk
-                            for doc in docs:
-                                doc["metadata"].update({
-                                    "record_id": item["identifier"],
-                                    "file_name": file_name
-                                })
-                            rag_system.add_documents(docs)
-    
-    progress(0.8, desc="Building vector database...")
-    rag_system.build_vector_db()
-    
-    progress(1.0, desc="RAG system ready")
-    return "RAG system initialized and ready", rag_system
+                    # Get file list with retry
+                    for attempt in range(max_retries):
+                        try:
+                            file_list = record.get_filelist(page=1, per_page=100).json()["items"]
+                            break
+                        except Exception as e:
+                            if attempt == max_retries - 1:
+                                print(f"Skipping record {item['identifier']} due to connection error")
+                                continue
+                            time.sleep(retry_delay)
+                    
+                    # Process each file
+                    for file_info in file_list:
+                        if file_info["name"].lower().endswith('.pdf'):
+                            try:
+                                with tempfile.TemporaryDirectory(prefix="tmp-kadichat-") as temp_dir:
+                                    temp_file_location = os.path.join(temp_dir, file_info["name"])
+                                    record.download_file(file_info["id"], temp_file_location)
+                                    
+                                    # Parse document and add to RAG
+                                    docs = load_and_chunk_pdf(temp_file_location)
+                                    for doc in docs:
+                                        doc["metadata"].update({
+                                            "record_id": item["identifier"],
+                                            "file_name": file_info["name"]
+                                        })
+                                    rag_system.add_documents(docs)
+                            except Exception as e:
+                                print(f"Error processing file {file_info['name']}: {str(e)}")
+                                continue
+                                
+                except Exception as e:
+                    print(f"Error processing record {item['identifier']}: {str(e)}")
+                    continue
+        
+        # Build vector database if we have documents
+        if rag_system.documents:
+            progress(0.8, desc="Building vector database...")
+            rag_system.build_vector_db()
+            progress(1.0, desc="RAG system ready")
+            return f"RAG system initialized with {len(rag_system.documents)} documents", rag_system
+        else:
+            return "No documents were processed successfully", None
+            
+    except Exception as e:
+        return f"Failed to initialize RAG system: {str(e)}", None
 
 
 def preprocess_response(response: str) -> str:
