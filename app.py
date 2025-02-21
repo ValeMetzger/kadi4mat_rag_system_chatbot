@@ -652,6 +652,15 @@ Relevant documents:
         return history + [(message, f"I apologize, but an error occurred while processing your request: {str(e)}")], ""
 
 
+def check_rag_system(rag):
+    """Check if RAG system is properly initialized"""
+    if isinstance(rag, SimpleRAG) and hasattr(rag, 'documents'):
+        print(f"RAG system initialized with {len(rag.documents)} documents")
+        return True
+    print("RAG system not properly initialized")
+    return False
+
+
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 app = gr.mount_gradio_app(app, login_demo, path="/main")
 
@@ -688,13 +697,6 @@ with gr.Blocks() as main_demo:
             refresh_btn = gr.Button("Refresh Chat", scale=1, variant="secondary")
 
         # Initialize RAG system on load
-        main_demo.load(_init_user_token, None, _state_user_token).then(
-            initialize_rag_system,
-            inputs=[_state_user_token],
-            outputs=[status_box, user_session_rag]
-        )
-
-        # Add this check after RAG initialization
         main_demo.load(
             _init_user_token, 
             None, 
