@@ -441,20 +441,14 @@ def initialize_rag_system(token, progress=gr.Progress()):
                 response = manager.search.search_resources("record", per_page=100)
                 parsed = json.loads(response.content)
                 
-                # Debug the API response
-                print("API Response:", parsed)
+                print("API Response structure:", list(parsed.keys()))
                 
-                if "data" in parsed:  # Some APIs use 'data' instead of 'items'
-                    items = parsed["data"]
-                    total_pages = parsed.get("meta", {}).get("total_pages", 1)
-                elif "_pagination" in parsed:
-                    items = parsed.get("items", [])
-                    total_pages = parsed["_pagination"]["total_pages"]
-                else:
-                    print("Unexpected API response format:", parsed)
-                    return "Failed to parse API response", None
+                # Extract items and pagination info
+                items = parsed.get("items", [])
+                total_pages = parsed.get("_pagination", {}).get("total_pages", 1)
                 
                 if not items:
+                    print("No records found in initial response")
                     return "No records found", None
                     
                 break
@@ -464,66 +458,22 @@ def initialize_rag_system(token, progress=gr.Progress()):
                 print(f"Attempt {attempt + 1} failed, retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
         
-        progress(0.1, desc="Collecting records...")
+        progress(0.1, desc="Processing records...")
+        processed_records = 0
         
-        # Process each record with retry logic
-        for page in range(1, total_pages + 1):
-            progress(0.1 + (0.4 * page/total_pages), desc=f"Processing records page {page}/{total_pages}")
-            
-            # Get page of records
-            for attempt in range(max_retries):
-                try:
-                    page_endpoint = f"{manager.host}/api/records?page={page}&per_page=100"
-                    response = manager.make_request(page_endpoint)
-                    parsed = json.loads(response.content)
+        # Process each record
+        for item in items:
+            try:
+                record_id = item.get("identifier")
+                if not record_id:
+                    continue
                     
-                    if "data" in parsed:
-                        items = parsed["data"]
-                    else:
-                        items = parsed.get("items", [])
-                        
-                    if not items:
-                        print(f"No items found in page {page}")
-                        continue
-                        
-                    break
-                except Exception as e:
-                    if attempt == max_retries - 1:
-                        print(f"Skipping page {page} due to connection error: {str(e)}")
-                        continue
-                    time.sleep(retry_delay)
-            
-            # Process each record in the page
-            for item in items:
+                record = manager.record(identifier=record_id)
+                
+                # Get files for this record
                 try:
-                    record_id = item.get("identifier") or item.get("id")
-                    if not record_id:
-                        print("Record missing identifier:", item)
-                        continue
-                        
-                    record = manager.record(identifier=record_id)
-                    
-                    # Get file list with retry
-                    for attempt in range(max_retries):
-                        try:
-                            response = record.get_filelist(page=1, per_page=100)
-                            file_list = response.json()
-                            
-                            if "data" in file_list:
-                                files = file_list["data"]
-                            else:
-                                files = file_list.get("items", [])
-                                
-                            if not files:
-                                print(f"No files found in record {record_id}")
-                                break
-                                
-                            break
-                        except Exception as e:
-                            if attempt == max_retries - 1:
-                                print(f"Skipping record {record_id} due to error: {str(e)}")
-                                continue
-                            time.sleep(retry_delay)
+                    file_list = record.get_filelist().json()
+                    files = file_list.get("items", [])
                     
                     # Process each file
                     for file_info in files:
@@ -531,7 +481,6 @@ def initialize_rag_system(token, progress=gr.Progress()):
                         file_id = file_info.get("id")
                         
                         if not all([file_name, file_id]):
-                            print(f"Invalid file info in record {record_id}:", file_info)
                             continue
                             
                         if file_name.lower().endswith('.pdf'):
@@ -545,7 +494,8 @@ def initialize_rag_system(token, progress=gr.Progress()):
                                     for doc in docs:
                                         doc["metadata"].update({
                                             "record_id": record_id,
-                                            "file_name": file_name
+                                            "file_name": file_name,
+                                            "record_title": item.get("title", "Unknown")
                                         })
                                     rag_system.add_documents(docs)
                                     print(f"Successfully processed {file_name} from record {record_id}")
@@ -554,15 +504,22 @@ def initialize_rag_system(token, progress=gr.Progress()):
                                 continue
                                 
                 except Exception as e:
-                    print(f"Error processing record {record_id if 'record_id' in locals() else 'unknown'}: {str(e)}")
+                    print(f"Error getting files for record {record_id}: {str(e)}")
                     continue
+                
+                processed_records += 1
+                progress(0.1 + (0.7 * processed_records/len(items)), desc=f"Processed {processed_records}/{len(items)} records")
+                
+            except Exception as e:
+                print(f"Error processing record: {str(e)}")
+                continue
         
         # Build vector database if we have documents
         if rag_system.documents:
             progress(0.8, desc="Building vector database...")
             rag_system.build_vector_db()
             progress(1.0, desc="RAG system ready")
-            return f"RAG system initialized with {len(rag_system.documents)} documents", rag_system
+            return f"RAG system initialized with {len(rag_system.documents)} documents from {processed_records} records", rag_system
         else:
             return "No documents were processed successfully", None
             
