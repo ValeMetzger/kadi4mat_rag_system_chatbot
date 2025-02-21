@@ -568,17 +568,9 @@ class EnhancedRAG:
 
 def chat_response(message: str, history: List[Tuple[str, str]], rag_system: EnhancedRAG) -> Tuple[List[Tuple[str, str]], str]:
     try:
-        context = rag_system.get_relevant_context(message, k=3)
-        print(f"Retrieved context: {context}")  # Debug logging
-        
-        prompt = f"..."
-        print(f"Generated prompt: {prompt}")  # Debug logging
-        
-        response = client.text_generation(...)
-        print(f"Raw response: {response}")  # Debug logging
-        
         # Get relevant context with more results
         context = rag_system.get_relevant_context(message, k=5)
+        print(f"Retrieved context: {context}")  # Debug logging
         
         # Build prompt
         prompt = f"""<s>[INST] You are a helpful assistant for answering questions about documents stored in Kadi4mat. 
@@ -591,15 +583,19 @@ Question: {message}
 
 Provide a clear, factual answer using only the information from the context above. If the context doesn't contain relevant information, say "I don't have enough information in the provided context to answer this question." [/INST]"""
 
+        print(f"Generated prompt: {prompt}")  # Debug logging
+        
         # Get response with stricter parameters
         response = client.text_generation(
             prompt=prompt,
             max_new_tokens=512,
-            temperature=0.7,  # Increase for more natural responses
-            top_p=0.9,       # Less restrictive
+            temperature=0.7,
+            top_p=0.9,
             repetition_penalty=1.1,
             do_sample=True
         )
+        
+        print(f"Raw response: {response}")  # Debug logging
         
         # Clean response
         response = response.replace("<s>", "").replace("</s>", "")
