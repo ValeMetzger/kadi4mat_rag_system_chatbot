@@ -837,19 +837,25 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
         context = user_session_rag.get_context_for_query(message)
         
         # Construct a more natural prompt
-        prompt = f"""<s>[INST] You are a knowledgeable AI assistant having a natural conversation. You have access to both general knowledge and specific documents.
-
-{f'Here are some relevant passages from the documents I have access to:\n\n{context}\n\n' if context else ''}
-The user asks: {message}
-
-Please provide a natural, informative response. You can:
-- Draw from both the documents and your general knowledge
-- Freely explore related topics that might be interesting or relevant
-- Reference specific documents when they're relevant
-- Acknowledge when you're speculating or going beyond the documents
-- Use a conversational, engaging tone
-
-Remember: You're not limited to only discussing the documents - use them when relevant but feel free to expand the discussion naturally. [/INST]"""
+        prompt_parts = [
+            "<s>[INST] You are a knowledgeable AI assistant having a natural conversation. You have access to both general knowledge and specific documents.\n\n"
+        ]
+        
+        if context:
+            prompt_parts.append(f"Here are some relevant passages from the documents I have access to:\n\n{context}\n\n")
+        
+        prompt_parts.extend([
+            f"The user asks: {message}\n\n",
+            "Please provide a natural, informative response. You can:\n",
+            "- Draw from both the documents and your general knowledge\n",
+            "- Freely explore related topics that might be interesting or relevant\n",
+            "- Reference specific documents when they're relevant\n",
+            "- Acknowledge when you're speculating or going beyond the documents\n",
+            "- Use a conversational, engaging tone\n\n",
+            "Remember: You're not limited to only discussing the documents - use them when relevant but feel free to expand the discussion naturally. [/INST]"
+        ])
+        
+        prompt = "".join(prompt_parts)
 
         # Generate response with creative parameters
         response = client.text_generation(
