@@ -614,17 +614,32 @@ Question: {message} [/INST]"""
         print(f"Error in chat response: {str(e)}")
         return history + [(message, "I encountered an error. Please try again.")], ""
 
-# Update the handle_chat function to use enhanced_chat_response
+def process_chat(message, history, loading_state):
+    """Process chat messages and return responses."""
+    if loading_state:
+        return history + [(message, "Still loading documents. Please wait...")], ""
+    
+    # Get the RAG system from the state
+    rag_system = user_session_rag.value
+    
+    if not rag_system or not hasattr(rag_system, 'vector_store'):
+        return history + [(message, "RAG system not properly initialized. Please refresh the page.")], ""
+    
+    return chat_response(message, history, rag_system)
+
 def handle_chat(message, history, loading_state):
     """Handle chat with loading state and enhanced response."""
     try:
         if loading_state:
             return history + [(message, "Still loading documents. Please wait...")], ""
             
-        if not user_session_rag or not user_session_rag.vector_store:
+        # Get the RAG system from the state
+        rag_system = user_session_rag.value
+        
+        if not rag_system or not hasattr(rag_system, 'vector_store'):
             return history + [(message, "RAG system not properly initialized. Please refresh the page.")], ""
             
-        return chat_response(message, history, user_session_rag)
+        return chat_response(message, history, rag_system)
         
     except Exception as e:
         error_msg = f"Error in chat handler: {str(e)}"
@@ -655,9 +670,15 @@ with gr.Blocks() as main_demo:
     async def initialize_system(request: gr.Request):
         try:
             user_token = request.request.session["user_access_token"]
-            num_docs = await process_all_records_and_files(user_token)
+            rag_system, num_chunks = await process_all_records_and_files(user_token)
+            
+            # Update the global state
+            user_session_rag.value = rag_system
             loading_state.value = False
-            return f"System Status: Ready! Loaded {num_docs} documents."
+            
+            # Show both document count and chunk count
+            doc_count = len(rag_system.vector_store._collection.count())  # Get actual document count
+            return f"System Status: Ready! Processed {doc_count} documents into {num_chunks} searchable chunks."
         except Exception as e:
             loading_state.value = False
             return f"System Status: Error - {str(e)}"
@@ -705,17 +726,6 @@ with gr.Blocks() as main_demo:
         )
 
         # Define chat functionality
-        def process_chat(message, history, loading_state):
-            """Process chat messages and return responses."""
-            if loading_state:
-                return history + [(message, "Still loading documents. Please wait...")], ""
-            
-            if not user_session_rag or not user_session_rag.vector_store:
-                return history + [(message, "RAG system not properly initialized. Please refresh the page.")], ""
-            
-            return chat_response(message, history, user_session_rag)
-
-        # Button actions
         txt_input.submit(
             fn=process_chat,
             inputs=[txt_input, chatbot, loading_state],
