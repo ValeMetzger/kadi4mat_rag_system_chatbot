@@ -568,14 +568,17 @@ def chat_response(message: str, history: List[Tuple[str, str]], rag_system: Enha
     try:
         context = rag_system.get_relevant_context(message)
         
-        prompt = f"""<s>[INST] You are a helpful assistant for answering questions about documents stored in Kadi4mat. 
-Always base your answers on the provided context. If no relevant context is available, say so directly.
-
-{f'Relevant context from documents:\n{context}\n' if context else 'No relevant context found in the documents.\n'}
-
-Question: {message}
-
-Provide a clear, factual answer based only on the available context. [/INST]"""
+        # Split the prompt into parts to avoid f-string issues with backslashes
+        system_instruction = "<s>[INST] You are a helpful assistant for answering questions about documents stored in Kadi4mat. Always base your answers on the provided context. If no relevant context is available, say so directly.\n\n"
+        
+        context_section = f"Relevant context from documents:\n{context}\n\n" if context else "No relevant context found in the documents.\n\n"
+        
+        question_section = f"Question: {message}\n\n"
+        
+        final_instruction = "Provide a clear, factual answer based only on the available context. [/INST]"
+        
+        # Combine all parts
+        prompt = system_instruction + context_section + question_section + final_instruction
 
         response = client.text_generation(
             prompt=prompt,
@@ -668,6 +671,27 @@ with gr.Blocks() as main_demo:
             clear_btn = gr.Button("Clear Chat")
 
 app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
+
+async def initialize_system(request: gr.Request):
+    try:
+        user_token = request.request.session["user_access_token"]
+        rag_system, total_chunks = await process_all_records_and_files(user_token)
+        
+        # Update the global state
+        user_session_rag.value = rag_system
+        loading_state.value = False
+        
+        return f"System Status: Ready! Processed {total_chunks} document chunks."
+    except Exception as e:
+        loading_state.value = False
+        return f"System Status: Error - {str(e)}"
+
+# Add this to your Gradio interface
+main_demo.load(
+    fn=initialize_system,
+    inputs=None,
+    outputs=loading_status
+)
 
 if __name__ == "__main__":
     uvicorn.run(app, port=7860, host="0.0.0.0")
