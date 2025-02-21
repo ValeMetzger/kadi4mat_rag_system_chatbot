@@ -109,19 +109,13 @@ class DocumentProcessor:
         self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
     
     def preprocess_document(self, text: str) -> str:
-        """Enhanced document preprocessing."""
-        # Remove excessive whitespace while preserving paragraph breaks
-        text = re.sub(r'\n\s*\n', '\n\n', text)
-        text = re.sub(r'\s+', ' ', text)
-        
-        # Normalize punctuation
-        text = re.sub(r'[''´`]', "'", text)
-        text = re.sub(r'["""]', '"', text)
-        
-        # Remove non-printable characters while preserving useful Unicode
-        text = ''.join(char for char in text if unicodedata.category(char)[0] != 'C')
-        
-        return text.strip()
+        # Remove technical markers and artifacts
+        text = re.sub(r'={2,}.*?={2,}', '', text)  # Remove === sections
+        text = re.sub(r'\[.*?\]', '', text)  # Remove [] sections
+        text = re.sub(r'`{1,}', '', text)     # Remove backticks
+        text = re.sub(r'\s+', ' ', text)      # Normalize whitespace
+        text = text.strip()
+        return text
     
     def chunk_document(self, text: str, max_chunk_size: int = 512, min_chunk_size: int = 100) -> List[dict]:
         """Improved chunking without NLTK dependency."""
@@ -562,14 +556,8 @@ class EnhancedRAG:
     def get_relevant_context(self, query: str, k: int = 3) -> str:
         """Get relevant context for query."""
         try:
-            results = self.vector_store.similarity_search_with_score(query, k=k)
-            
-            contexts = []
-            for doc, score in results:
-                if score < 1.5:  # Add relevance threshold
-                    contexts.append(f"From {doc.metadata.get('source', 'unknown')}:\n{doc.page_content}")
-            
-            return "\n\n".join(contexts) if contexts else ""
+            results = self.vector_store.similarity_search_with_score(query, k=k*2)  # Get more candidates
+            return "\n".join(doc.page_content for doc, score in results if score < 1.0)[:1500]  # Stricter filtering
             
         except Exception as e:
             print(f"Error retrieving context: {str(e)}")
@@ -599,11 +587,11 @@ Please provide a clear, direct answer. [/INST]"""
         # Get response from LLM
         response = client.text_generation(
             prompt=prompt,
-            max_new_tokens=1024,
-            temperature=0.3,  # Lower temperature for more focused responses
+            max_new_tokens=1024
+"""             temperature=0.3,  # Lower temperature for more focused responses
             repetition_penalty=1.1,
             do_sample=True,
-            top_p=0.9
+            top_p=0.9 """
         )
         
         # Improved response cleaning
