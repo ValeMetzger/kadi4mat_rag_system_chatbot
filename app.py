@@ -499,21 +499,11 @@ class SimpleRAG:
         self.vector_store = None
         self.documents = []
     
-    def search_documents(self, query: str, k: int = 3, doc_filter: Optional[List[str]] = None) -> List[str]:
-        """
-        Search for relevant document chunks.
-        
-        Args:
-            query: The search query
-            k: Number of results to return
-            doc_filter: Optional list of document IDs or names to filter by
-        """
+    def search_documents(self, query: str, k: int = 5, doc_filter: Optional[List[str]] = None) -> List[str]:
+        """Search for relevant document chunks."""
         try:
             if not self.vector_store:
-                print("Warning: Vector store not initialized")
                 return []
-            
-            print(f"\nSearching for query: {query}")
             
             # Search with scores
             results = self.vector_store.similarity_search_with_score(
@@ -521,26 +511,12 @@ class SimpleRAG:
                 k=k
             )
             
-            print(f"Found {len(results)} results")
-            
             filtered_results = []
             seen_doc_ids = set()
             
-            for idx, (doc, score) in enumerate(results):
-                print(f"\nResult {idx}:")
-                print(f"Score: {score}")
-                print(f"Content preview: {doc.page_content[:200]}...")
-                print(f"Metadata: {doc.metadata}")
-                
-                # Check if document matches filter criteria
-                if doc_filter:
-                    doc_id = doc.metadata.get('source', '')
-                    if not any(f in doc_id for f in doc_filter):
-                        print(f"Skipped due to document filter")
-                        continue
-                
-                # Apply score threshold
-                if score < 2.0:
+            for doc, score in results:
+                # More lenient threshold
+                if score < 2.5:  # Increased from 2.0
                     doc_id = doc.metadata.get('doc_id')
                     if doc_id not in seen_doc_ids:
                         filtered_results.append({
@@ -549,17 +525,11 @@ class SimpleRAG:
                             'score': score
                         })
                         seen_doc_ids.add(doc_id)
-                        print(f"Added to filtered results (doc_id: {doc_id})")
-                else:
-                    print("Skipped due to score threshold")
             
-            print(f"\nReturning {len(filtered_results)} filtered results")
             return filtered_results
             
         except Exception as e:
             print(f"Error searching documents: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
             return []
 
     def get_context_for_query(self, query: str, doc_filter: Optional[List[str]] = None) -> str:
@@ -833,45 +803,42 @@ def clean_response(response: str) -> str:
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     try:
-        # Get context from RAG system
+        # Get context from RAG system but don't make it mandatory
         context = user_session_rag.get_context_for_query(message)
         
-        # Construct a more natural prompt
-        prompt_parts = [
-            "<s>[INST] You are a knowledgeable AI assistant having a natural conversation. You have access to both general knowledge and specific documents.\n\n"
-        ]
-        
-        if context:
-            prompt_parts.append(f"Here are some relevant passages from the documents I have access to:\n\n{context}\n\n")
-        
-        prompt_parts.extend([
-            f"The user asks: {message}\n\n",
-            "Please provide a natural, informative response. You can:\n",
-            "- Draw from both the documents and your general knowledge\n",
-            "- Freely explore related topics that might be interesting or relevant\n",
-            "- Reference specific documents when they're relevant\n",
-            "- Acknowledge when you're speculating or going beyond the documents\n",
-            "- Use a conversational, engaging tone\n\n",
-            "Remember: You're not limited to only discussing the documents - use them when relevant but feel free to expand the discussion naturally. [/INST]"
-        ])
-        
-        prompt = "".join(prompt_parts)
+        # Simpler, more natural prompt that encourages free-form responses
+        prompt = f"""<s>[INST] You are a helpful AI assistant having a natural conversation. You have broad knowledge and can discuss any topic.
 
-        # Generate response with creative parameters
+{f'I have access to some relevant documents that might be helpful:\n\n{context}\n\n' if context else ''}
+
+The user asks: {message}
+
+Feel free to:
+- Answer naturally and conversationally
+- Use your general knowledge
+- Reference the documents when relevant
+- Explore related topics
+- Be detailed and thorough
+- Structure your response in a clear way
+
+Just be helpful and natural in your response. [/INST]"""
+
+        # More permissive generation parameters
         response = client.text_generation(
             prompt=prompt,
-            max_new_tokens=2048,  # Allow for longer responses
-            temperature=0.8,  # More creative
-            top_p=0.95,  # More diverse vocabulary
-            repetition_penalty=1.05,  # Allow more natural repetition
+            max_new_tokens=2048,
+            temperature=0.9,  # Increased creativity
+            top_p=0.95,
+            repetition_penalty=1.03,  # Very light repetition penalty
             do_sample=True,
-            stop_sequences=["</s>"]  # Only stop at end of sequence
+            stop_sequences=["</s>"]
         )
         
-        # Simpler response cleaning
+        # Minimal cleaning to preserve response structure
         cleaned_response = response.split("[/INST]")[-1].strip()
-        cleaned_response = cleaned_response.replace("<s>", "").replace("</s>", "")
-        
+        if not cleaned_response:
+            return history + [(message, "I apologize, but I couldn't generate a response. Please try again.")], ""
+            
         return history + [(message, cleaned_response)], ""
         
     except Exception as e:
