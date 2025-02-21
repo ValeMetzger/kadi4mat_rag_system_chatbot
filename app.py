@@ -833,67 +833,39 @@ def clean_response(response: str) -> str:
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     try:
-        # Parse if user wants specific documents or general knowledge
-        use_general_knowledge = any(phrase in message.lower() for phrase in [
-            "what do you know about", "tell me about", "explain", "how does",
-            "what is", "define", "describe"
-        ])
-        
-        # Get context from the RAG system
+        # Get context from RAG system
         context = user_session_rag.get_context_for_query(message)
         
-        # Determine response type based on context and query
-        if not context and not use_general_knowledge:
-            return history + [(message, "I couldn't find relevant information in the documents. Would you like me to share what I know about this topic in general?")], ""
-        
-        # Construct base prompt with system context
-        base_prompt = """<s>[INST] You are a knowledgeable AI assistant with expertise in many fields, particularly in scientific and technical domains. You have both general knowledge and access to specific documents.
+        # Construct a more natural prompt
+        prompt = f"""<s>[INST] You are a knowledgeable AI assistant having a natural conversation. You have access to both general knowledge and specific documents.
 
-Your capabilities:
-1. You can share your general knowledge when appropriate
-2. You can analyze and reference specific documents when needed
-3. You can combine both sources of information when useful
+{f'Here are some relevant passages from the documents I have access to:\n\n{context}\n\n' if context else ''}
+The user asks: {message}
 
-Current conversation context:
-- If asked about documents, focus on their content
-- If asked general questions, you can share your broader knowledge
-- Always mention when you're using information from documents vs general knowledge
+Please provide a natural, informative response. You can:
+- Draw from both the documents and your general knowledge
+- Freely explore related topics that might be interesting or relevant
+- Reference specific documents when they're relevant
+- Acknowledge when you're speculating or going beyond the documents
+- Use a conversational, engaging tone
 
-"""
-        
-        # Add document context if available
-        if context:
-            base_prompt += f"""
-Relevant document content:
-{context}
+Remember: You're not limited to only discussing the documents - use them when relevant but feel free to expand the discussion naturally. [/INST]"""
 
-"""
-        
-        # Add the user's question and response guidance
-        base_prompt += f"""
-User Question: {message}
-
-Please provide a response that:
-- Clearly indicates whether you're using document information or general knowledge
-- Is natural and conversational in tone
-- Includes relevant details and examples
-- Maintains academic accuracy
-- Uses formatting for readability when appropriate
-
-Your response: [/INST]"""
-
-        # Generate response with more flexible parameters
+        # Generate response with creative parameters
         response = client.text_generation(
-            prompt=base_prompt,
-            max_new_tokens=1500,
-            temperature=0.7,
-            top_p=0.9,
-            repetition_penalty=1.1,
+            prompt=prompt,
+            max_new_tokens=2048,  # Allow for longer responses
+            temperature=0.8,  # More creative
+            top_p=0.95,  # More diverse vocabulary
+            repetition_penalty=1.05,  # Allow more natural repetition
             do_sample=True,
-            stop_sequences=["</s>"]
+            stop_sequences=["</s>"]  # Only stop at end of sequence
         )
         
-        cleaned_response = clean_response(response)
+        # Simpler response cleaning
+        cleaned_response = response.split("[/INST]")[-1].strip()
+        cleaned_response = cleaned_response.replace("<s>", "").replace("</s>", "")
+        
         return history + [(message, cleaned_response)], ""
         
     except Exception as e:
