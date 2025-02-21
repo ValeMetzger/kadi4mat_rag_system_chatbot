@@ -393,19 +393,38 @@ def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"
 
 
 def load_and_chunk_pdf(file_path):
-    """Extracts text from a PDF file and stores it in the property documents by chunks."""
+    """Extracts text from a PDF file and chunks it into documents."""
+    try:
+        with pymupdf.open(file_path) as pdf:
+            text = ""
+            for page in pdf:
+                page_text = page.get_text()
+                if page_text.strip():  # Only add non-empty pages
+                    text += page_text + "\n\n"  # Add page breaks
 
-    with pymupdf.open(file_path) as pdf:
-        text = ""
-        for page in pdf:
-            text += page.get_text()
+            if not text.strip():
+                print(f"Warning: No text content found in {file_path}")
+                return []
 
-        chunks = chunk_text(text)
-        documents = []
-        for chunk in chunks:
-            documents.append({"content": chunk, "metadata": pdf.metadata})
+            chunks = chunk_text(text)
+            if not chunks:
+                print(f"Warning: No chunks generated for {file_path}")
+                return []
 
-        return documents
+            documents = []
+            for i, chunk in enumerate(chunks):
+                if chunk.strip():  # Only add non-empty chunks
+                    documents.append({
+                        "content": chunk,
+                        "chunk_id": i,
+                        "total_chunks": len(chunks)
+                    })
+
+            return documents
+
+    except Exception as e:
+        print(f"Error processing PDF {file_path}: {str(e)}")
+        return []
 
 
 def load_pdf(file_path):
