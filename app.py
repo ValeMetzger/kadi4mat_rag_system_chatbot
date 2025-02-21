@@ -340,12 +340,12 @@ def detect_file_type(file_path):
         raise ValueError(f"Unsupported file type: {file_path}")
 
 async def process_all_records_and_files(user_token, progress=gr.Progress()):
-    """Process all records and their files."""
+    """Process all records and files with improved handling."""
     try:
         manager = KadiManager(instance=instance, host=host, pat=user_token)
         all_records = get_all_records(user_token)
         
-        rag = EnhancedRAG()
+        rag = ImprovedRAG()
         total_chunks = 0
         
         for i, record_id in enumerate(all_records):
@@ -357,7 +357,6 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
                     'description': record.meta.get('description', '')
                 }
                 
-                # Get all files in record
                 files = record.get_filelist().json()['items']
                 
                 for file_info in files:
@@ -366,10 +365,10 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
                             file_path = os.path.join(temp_dir, file_info['name'])
                             record.download_file(file_info['id'], file_path)
                             
-                            # Load and process file
                             doc = load_file(file_path)
-                            chunks_added = rag.add_documents([doc], metadata)
-                            total_chunks += chunks_added
+                            if doc['content']:  # Only process if content was successfully extracted
+                                chunks_added = rag.add_documents([doc], metadata)
+                                total_chunks += chunks_added
                             
                     except Exception as e:
                         print(f"Error processing file {file_info['name']}: {str(e)}")
@@ -513,79 +512,124 @@ with gr.Blocks() as login_demo:
 
 
 # A simple RAG implementation
-class EnhancedRAG:
+class ImprovedRAG:
     def __init__(self):
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-mpnet-base-v2"
-        )
-        self.vector_store = Chroma(
-            collection_name="kadi_records",
-            embedding_function=self.embeddings,
-            persist_directory="./chroma_db"
-        )
-        self.document_processor = DocumentProcessor()
-
+        self.embeddings_model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
+        self.documents = []
+        self.index = None
+        self.embeddings = None
+        
     def add_documents(self, documents: List[dict], metadata: dict) -> int:
         """Add documents to vector store with metadata."""
         try:
-            texts = []
-            metadatas = []
-            
+            chunks_count = 0
+            # Preprocess documents
             for doc in documents:
-                text = self.document_processor.preprocess_document(doc['content'])
-                chunks = self.document_processor.chunk_document(text, max_chunk_size=512)
+                content = self._preprocess_text(doc['content'])
+                chunks = self._chunk_text(content)
+                chunks_count += len(chunks)
                 
                 for chunk in chunks:
-                    texts.append(chunk['text'])
-                    metadatas.append({
-                        **metadata,
-                        'source': doc.get('source', 'unknown'),
-                        'chunk_size': chunk['token_count']
+                    self.documents.append({
+                        'content': chunk,
+                        'metadata': {
+                            **metadata,
+                            'source': doc.get('source', 'unknown')
+                        }
                     })
             
-            if texts:
-                self.vector_store.add_texts(texts=texts, metadatas=metadatas)
-            return len(texts)
+            # Update embeddings and index
+            self._update_index()
+            return chunks_count
             
         except Exception as e:
             print(f"Error adding documents: {str(e)}")
             return 0
 
+    def _preprocess_text(self, text: str) -> str:
+        """Clean and normalize text."""
+        text = re.sub(r'={2,}.*?={2,}', '', text)  # Remove technical markers
+        text = re.sub(r'\s+', ' ', text)           # Normalize whitespace
+        return text.strip()
+
+    def _chunk_text(self, text: str, chunk_size: int = 512, overlap: int = 50) -> List[str]:
+        """Chunk text into smaller pieces while preserving context."""
+        chunks = []
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        current_chunk = []
+        current_length = 0
+        
+        for sentence in sentences:
+            sentence_tokens = self.embeddings_model.tokenize([sentence])
+            sentence_length = len(sentence_tokens['input_ids'][0])
+            
+            if current_length + sentence_length > chunk_size and current_chunk:
+                chunks.append(' '.join(current_chunk))
+                # Keep last few sentences for overlap
+                overlap_sentences = current_chunk[-2:] if len(current_chunk) > 2 else current_chunk[-1:]
+                current_chunk = overlap_sentences
+                current_length = sum(len(self.embeddings_model.tokenize([s])['input_ids'][0]) for s in current_chunk)
+            
+            current_chunk.append(sentence)
+            current_length += sentence_length
+        
+        if current_chunk:
+            chunks.append(' '.join(current_chunk))
+        
+        return chunks
+
+    def _update_index(self):
+        """Update FAISS index with new embeddings."""
+        if not self.documents:
+            return
+            
+        texts = [doc['content'] for doc in self.documents]
+        self.embeddings = self.embeddings_model.encode(texts, show_progress_bar=True)
+        
+        # Initialize or update FAISS index
+        if self.index is None:
+            self.index = faiss.IndexFlatL2(self.embeddings.shape[1])
+        self.index = faiss.IndexFlatL2(self.embeddings.shape[1])
+        self.index.add(np.array(self.embeddings))
+
     def get_relevant_context(self, query: str, k: int = 3) -> str:
+        """Retrieve relevant context for the query."""
         try:
-            results = self.vector_store.similarity_search_with_score(query, k=k)
+            if not self.index or not self.documents:
+                return ""
+                
+            query_embedding = self.embeddings_model.encode([query])
+            D, I = self.index.search(np.array(query_embedding), k)
+            
             contexts = []
-            for doc, score in results:
-                if score < 1.5:  # More lenient threshold
+            for idx, score in zip(I[0], D[0]):
+                if score < 1.5:  # Similarity threshold
+                    doc = self.documents[idx]
                     contexts.append(
-                        f"--- Document: {doc.metadata.get('source', 'unknown')} ---\n"
-                        f"Content: {doc.page_content}\n"
+                        f"[Source: {doc['metadata'].get('source', 'unknown')}]\n"
+                        f"{doc['content']}\n"
                     )
-            return "\n".join(contexts) if contexts else ""
+            
+            return "\n---\n".join(contexts) if contexts else ""
+            
         except Exception as e:
             print(f"Error retrieving context: {str(e)}")
             return ""
 
-def chat_response(message: str, history: List[Tuple[str, str]], rag_system: EnhancedRAG) -> Tuple[List[Tuple[str, str]], str]:
+def chat_response(message: str, history: List[Tuple[str, str]], rag_system: ImprovedRAG) -> Tuple[List[Tuple[str, str]], str]:
     try:
-        # Get relevant context with more results
-        context = rag_system.get_relevant_context(message, k=5)
-        print(f"Retrieved context: {context}")  # Debug logging
+        context = rag_system.get_relevant_context(message, k=3)
         
-        # Build prompt
         prompt = f"""<s>[INST] You are a helpful assistant for answering questions about documents stored in Kadi4mat. 
-Base your answers only on the following context. If the context doesn't contain relevant information, say so clearly.
+Use only the following context to answer the question. If you don't find relevant information in the context, say so clearly.
 
 Context:
 {context}
 
 Question: {message}
 
-Provide a clear, factual answer using only the information from the context above. If the context doesn't contain relevant information, say "I don't have enough information in the provided context to answer this question." [/INST]"""
+Provide a clear, factual answer using only the information from the context above. If you cannot find relevant information, say "I don't have enough information in the provided context to answer this question." [/INST]"""
 
-        print(f"Generated prompt: {prompt}")  # Debug logging
-        
-        # Get response with stricter parameters
         response = client.text_generation(
             prompt=prompt,
             max_new_tokens=512,
@@ -595,16 +639,10 @@ Provide a clear, factual answer using only the information from the context abov
             do_sample=True
         )
         
-        print(f"Raw response: {response}")  # Debug logging
-        
-        # Clean response
         response = response.replace("<s>", "").replace("</s>", "")
         response = response.split("[/INST]")[-1].strip()
-        response = re.sub(r'[=\[\]`]+.*?[=\[\]`]+', '', response)
-        response = re.sub(r'\d+\.\s*\d+\.', '', response)
-        response = re.sub(r'\s{2,}', ' ', response)
         
-        if not response or len(response) < 10 or any(x in response for x in ['=====', '```', '[[[']):
+        if not response or len(response) < 10:
             return history + [(message, "I apologize, but I couldn't generate a proper response. Please try rephrasing your question.")], ""
             
         return history + [(message, response)], ""
