@@ -806,14 +806,16 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
         # Get context from RAG system but don't make it mandatory
         context = user_session_rag.get_context_for_query(message)
         
-        # Simpler, more natural prompt that encourages free-form responses
-        prompt = f"""<s>[INST] You are a helpful AI assistant having a natural conversation. You have broad knowledge and can discuss any topic.
-
-{f'I have access to some relevant documents that might be helpful:\n\n{context}\n\n' if context else ''}
-
-The user asks: {message}
-
-Feel free to:
+        # Build prompt parts separately to avoid f-string backslash issues
+        prompt_start = "<s>[INST] You are a helpful AI assistant having a natural conversation. You have broad knowledge and can discuss any topic.\n\n"
+        
+        context_part = ""
+        if context:
+            context_part = f"I have access to some relevant documents that might be helpful:\n\n{context}\n\n"
+        
+        question_part = f"The user asks: {message}\n\n"
+        
+        instructions = """Feel free to:
 - Answer naturally and conversationally
 - Use your general knowledge
 - Reference the documents when relevant
@@ -821,7 +823,10 @@ Feel free to:
 - Be detailed and thorough
 - Structure your response in a clear way
 
-Just be helpful and natural in your response. [/INST]"""
+Just be helpful and natural in your response."""
+        
+        # Combine all parts
+        prompt = prompt_start + context_part + question_part + instructions + " [/INST]"
 
         # More permissive generation parameters
         response = client.text_generation(
