@@ -553,18 +553,30 @@ class EnhancedRAG:
 
     def get_relevant_context(self, query: str, k: int = 3) -> str:
         try:
-            results = self.vector_store.similarity_search_with_score(query, k=k*2)
+            results = self.vector_store.similarity_search_with_score(query, k=k)
             contexts = []
             for doc, score in results:
-                if score < 1.0:  # Stricter relevance threshold
-                    contexts.append(f"From {doc.metadata.get('source', 'unknown')}:\n{doc.page_content}")
-            return "\n\n".join(contexts) if contexts else ""
+                if score < 1.5:  # More lenient threshold
+                    contexts.append(
+                        f"--- Document: {doc.metadata.get('source', 'unknown')} ---\n"
+                        f"Content: {doc.page_content}\n"
+                    )
+            return "\n".join(contexts) if contexts else ""
         except Exception as e:
             print(f"Error retrieving context: {str(e)}")
             return ""
 
 def chat_response(message: str, history: List[Tuple[str, str]], rag_system: EnhancedRAG) -> Tuple[List[Tuple[str, str]], str]:
     try:
+        context = rag_system.get_relevant_context(message, k=3)
+        print(f"Retrieved context: {context}")  # Debug logging
+        
+        prompt = f"..."
+        print(f"Generated prompt: {prompt}")  # Debug logging
+        
+        response = client.text_generation(...)
+        print(f"Raw response: {response}")  # Debug logging
+        
         # Get relevant context with more results
         context = rag_system.get_relevant_context(message, k=5)
         
@@ -583,9 +595,9 @@ Provide a clear, factual answer using only the information from the context abov
         response = client.text_generation(
             prompt=prompt,
             max_new_tokens=512,
-            temperature=0.1,
-            top_p=0.5,
-            repetition_penalty=1.2,
+            temperature=0.7,  # Increase for more natural responses
+            top_p=0.9,       # Less restrictive
+            repetition_penalty=1.1,
             do_sample=True
         )
         
