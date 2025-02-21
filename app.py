@@ -1030,20 +1030,25 @@ with gr.Blocks() as main_demo:
         )
 
         # Define chat functionality
-        def handle_chat(message, history, loading_state):
+        def process_chat(message, history, loading_state):
+            """Process chat messages and return responses."""
             if loading_state:
                 return history + [(message, "Still loading documents. Please wait...")], ""
-            return handle_chat(message, history, loading_state)
+            
+            if not user_session_rag or not user_session_rag.vector_store:
+                return history + [(message, "RAG system not properly initialized. Please refresh the page.")], ""
+            
+            return enhanced_chat_response(message, history, user_session_rag)
 
         # Button actions
         txt_input.submit(
-            fn=handle_chat,
+            fn=process_chat,
             inputs=[txt_input, chatbot, loading_state],
             outputs=[chatbot, txt_input]
         )
         
         submit_btn.click(
-            fn=handle_chat,
+            fn=process_chat,
             inputs=[txt_input, chatbot, loading_state],
             outputs=[chatbot, txt_input]
         )
