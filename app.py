@@ -46,9 +46,6 @@ from transformers import AutoTokenizer
 from huggingface_hub import InferenceClient
 from typing import List, Tuple
 import re
-import nltk
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
 import unicodedata
 
 # Kadi OAuth settings
@@ -109,8 +106,6 @@ embeddings_model = SentenceTransformer(
 class DocumentProcessor:
     def __init__(self):
         self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-        nltk.download('punkt', quiet=True)
-        self.nltk_tokenizer = nltk.sent_tokenize
     
     def preprocess_document(self, text: str) -> str:
         """Enhanced document preprocessing."""
@@ -128,8 +123,10 @@ class DocumentProcessor:
         return text.strip()
     
     def chunk_document(self, text: str, max_chunk_size: int = 512, min_chunk_size: int = 100) -> List[dict]:
-        """Improved semantic chunking with metadata."""
+        """Improved chunking without NLTK dependency."""
         chunks = []
+        
+        # Split into paragraphs first
         paragraphs = text.split('\n\n')
         current_chunk = []
         current_length = 0
@@ -138,15 +135,20 @@ class DocumentProcessor:
             para = para.strip()
             if not para:
                 continue
-                
+            
             # Get paragraph tokens
             tokens = self.tokenizer.encode(para)
             para_length = len(tokens)
             
-            # If paragraph is too long, split into sentences
+            # If paragraph is too long, split by sentences using regex
             if para_length > max_chunk_size:
-                sentences = self.nltk_tokenizer(para)
+                # Simple sentence splitting using regex
+                sentences = re.split(r'(?<=[.!?])\s+', para)
                 for sent in sentences:
+                    sent = sent.strip()
+                    if not sent:
+                        continue
+                        
                     sent_tokens = self.tokenizer.encode(sent)
                     sent_length = len(sent_tokens)
                     
