@@ -607,7 +607,7 @@ Source: {chunk['source']}
                 print(f"Content length: {len(doc.get('content', ''))}")
                 print(f"Content preview: {doc.get('content', '')[:200]}...")
             
-            processed_chunks = []
+            processed_texts = []
             chunk_metadata = []
             
             for doc_idx, doc in enumerate(self.documents):
@@ -616,19 +616,20 @@ Source: {chunk['source']}
                 print(f"\nDocument {doc_idx} produced {len(chunks)} chunks")
                 
                 for chunk_idx, chunk in enumerate(chunks):
-                    processed_chunks.append(chunk)
+                    # Extract text from chunk dictionary
+                    processed_texts.append(chunk['text'])  # Use the 'text' key from the chunk
                     chunk_metadata.append({
-                        "chunk_id": len(processed_chunks) - 1,
+                        "chunk_id": len(processed_texts) - 1,
                         "doc_id": f"doc_{doc_idx}",
                         "source": doc.get('source', 'unknown'),
                         "file_type": doc.get('metadata', {}).get('file_type', 'unknown')
                     })
             
-            print(f"\nTotal chunks created: {len(processed_chunks)}")
-            if processed_chunks:
-                print(f"First chunk preview: {processed_chunks[0][:200]}...")
+            print(f"\nTotal chunks created: {len(processed_texts)}")
+            if processed_texts:
+                print(f"First chunk preview: {processed_texts[0][:200]}")  # Now we can slice the string
             
-            if not processed_chunks:
+            if not processed_texts:
                 print("Warning: No chunks were created from the documents")
                 return 0
             
@@ -640,12 +641,12 @@ Source: {chunk['source']}
             
             # Add chunks with their corresponding metadata
             self.vector_store.add_texts(
-                texts=processed_chunks,
+                texts=processed_texts,  # Use processed_texts instead of processed_chunks
                 metadatas=chunk_metadata
             )
             
-            print(f"\nSuccessfully built vector database with {len(processed_chunks)} chunks")
-            return len(processed_chunks)
+            print(f"\nSuccessfully built vector database with {len(processed_texts)} chunks")
+            return len(processed_texts)
             
         except Exception as e:
             print(f"Error building vector database: {str(e)}")
