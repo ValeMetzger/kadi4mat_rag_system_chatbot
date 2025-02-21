@@ -343,7 +343,10 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
     manager = KadiManager(instance=instance, host=host, pat=user_token)
     all_records = get_all_records(user_token)
 
-    documents = []
+    # Initialize enhanced RAG system
+    rag = EnhancedRAG()
+    total_chunks = 0
+    
     total_records = len(all_records)
     print(f"Found {total_records} records to process")
     progress(0, desc=f"Found {total_records} records to process")
@@ -354,6 +357,7 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
             file_names = [info["name"] for info in record.get_filelist().json()["items"]]
             print(f"Processing record {record_id} with {len(file_names)} files")
             
+            documents = []
             for file_name in file_names:
                 try:
                     file_id = record.get_file_id(file_name)
@@ -361,31 +365,34 @@ async def process_all_records_and_files(user_token, progress=gr.Progress()):
                         temp_file_location = os.path.join(temp_dir, file_name)
                         record.download_file(file_id, temp_file_location)
                         doc = load_file(temp_file_location)
-                        # Add record metadata to the document
-                        doc["metadata"]["record_id"] = record_id
                         documents.append(doc)
-                        print(f"Successfully processed file: {file_name}")
                 except Exception as e:
                     print(f"Error processing file {file_name} in record {record_id}: {str(e)}")
-
+            
+            # Add record with metadata
+            metadata = {
+                "title": record.meta.get("title", ""),
+                "description": record.meta.get("description", ""),
+                "created": record.meta.get("created", ""),
+                "modified": record.meta.get("modified", "")
+            }
+            
+            chunks_added = rag.add_record(record_id, documents, metadata)
+            total_chunks += chunks_added
+            
             progress((i + 1) / total_records, desc=f"Processing record {i + 1}/{total_records}")
+            
         except Exception as e:
             print(f"Error processing record {record_id}: {str(e)}")
             continue
 
-    print(f"\nProcessed {len(documents)} documents in total")
-    
-    # Initialize RAG system with all documents
-    rag = SimpleRAG()
-    rag.documents = documents
-    print("\nBuilding vector database...")
-    rag.build_vector_db()
+    print(f"\nProcessed {total_chunks} chunks from {len(all_records)} records")
     
     # Update the global RAG system
     global user_session_rag
     user_session_rag = rag
     
-    return len(documents)
+    return total_chunks
 
 def greet(request: gr.Request):
     """Show greeting message."""
@@ -522,7 +529,7 @@ with gr.Blocks() as login_demo:
 
 
 # A simple RAG implementation
-class SimpleRAG:
+class EnhancedRAG:
     def __init__(self):
         self.document_processor = DocumentProcessor()
         self.embeddings = HuggingFaceEmbeddings(
@@ -530,73 +537,109 @@ class SimpleRAG:
         )
         self.vector_store = None
         self.documents = []
-    
-    def search_documents(self, query: str, k: int = 5, doc_filter: Optional[List[str]] = None) -> List[dict]:
-        """Search for relevant document chunks."""
-        try:
-            if not self.vector_store:
-                return []
+        self.record_metadata = {}  # Store record-specific metadata
+        
+    def search_documents(self, query: str, record_ids: List[str] = None, k: int = 5) -> List[dict]:
+        """
+        Search for relevant document chunks with optional record filtering.
+        
+        Args:
+            query: Search query
+            record_ids: Optional list of specific record IDs to search within
+            k: Number of results to return
+        """
+        if not self.vector_store:
+            return []
             
-            # Search with scores
-            results = self.vector_store.similarity_search_with_score(
-                query,
-                k=k
+        # Build filter based on record IDs if provided
+        filter_dict = None
+        if record_ids:
+            filter_dict = {"record_id": {"$in": record_ids}}
+            
+        results = self.vector_store.similarity_search_with_score(
+            query,
+            k=k * 2,  # Get more results initially for better filtering
+            filter=filter_dict
+        )
+        
+        filtered_results = []
+        seen_records = set()
+        
+        for doc, score in results:
+            record_id = doc.metadata.get('record_id')
+            
+            # Ensure diversity across records
+            if len(filtered_results) < k or record_id not in seen_records:
+                filtered_results.append({
+                    'content': doc.page_content,
+                    'record_id': record_id,
+                    'source': doc.metadata.get('source', 'unknown'),
+                    'score': score,
+                    'metadata': self.record_metadata.get(record_id, {})
+                })
+                seen_records.add(record_id)
+                
+        return filtered_results[:k]
+
+    def add_record(self, record_id: str, documents: List[dict], metadata: dict = None):
+        """Add a new record with its documents and metadata."""
+        try:
+            # Store record metadata
+            self.record_metadata[record_id] = metadata or {}
+            
+            processed_texts = []
+            chunk_metadata = []
+            
+            for doc_idx, doc in enumerate(documents):
+                clean_text = self.document_processor.preprocess_document(doc['content'])
+                chunks = self.document_processor.chunk_document(clean_text)
+                
+                for chunk in chunks:
+                    processed_texts.append(chunk['text'])
+                    chunk_metadata.append({
+                        "record_id": record_id,
+                        "source": doc.get('source', 'unknown'),
+                        "file_type": doc.get('metadata', {}).get('file_type', 'unknown'),
+                        "chunk_size": chunk['token_count']
+                    })
+            
+            # Initialize vector store if needed
+            if not self.vector_store:
+                self.vector_store = Chroma(
+                    collection_name="records",
+                    embedding_function=self.embeddings
+                )
+            
+            # Add chunks with metadata
+            self.vector_store.add_texts(
+                texts=processed_texts,
+                metadatas=chunk_metadata
             )
             
-            filtered_results = []
-            seen_doc_ids = set()
-            
-            for doc, score in results:
-                # More lenient threshold
-                if score < 2.5:  # Increased from 2.0
-                    doc_id = doc.metadata.get('doc_id')
-                    if doc_id not in seen_doc_ids:
-                        filtered_results.append({
-                            'content': doc.page_content,
-                            'source': doc.metadata.get('source', 'unknown'),
-                            'score': score
-                        })
-                        seen_doc_ids.add(doc_id)
-            
-            return filtered_results
+            return len(processed_texts)
             
         except Exception as e:
-            print(f"Error searching documents: {str(e)}")
-            return []
+            print(f"Error adding record {record_id}: {str(e)}")
+            return 0
 
-    def get_context_for_query(self, query: str, k: int = 5, doc_filter: Optional[List[str]] = None) -> str:
-        """
-        Get formatted context for a query, optionally filtered by specific documents.
-        Parameters:
-            query (str): The search query
-            k (int): Number of chunks to retrieve
-            doc_filter (Optional[List[str]]): Optional list of document IDs to filter by
-        """
-        try:
-            relevant_chunks = self.search_documents(query, k=k, doc_filter=doc_filter)
-            if not relevant_chunks:
-                return ""
-            
-            # Format context with source information
-            formatted_chunks = []
-            for chunk in relevant_chunks:
-                formatted_chunks.append(f"""
+    def get_context_for_query(self, query: str, record_ids: List[str] = None) -> str:
+        """Get relevant context with record information."""
+        relevant_chunks = self.search_documents(query, record_ids=record_ids)
+        if not relevant_chunks:
+            return ""
+        
+        formatted_chunks = []
+        for chunk in relevant_chunks:
+            metadata = chunk['metadata']
+            formatted_chunks.append(f"""
+Record ID: {chunk['record_id']}
 Source: {chunk['source']}
+{metadata.get('description', '')}
 ---
 {chunk['content']}
 """)
-            
-            context = "\n\n".join(formatted_chunks)
-            
-            # Limit context length if needed
-            if len(context) > 3000:  # Increased limit
-                context = context[:2997] + "..."
-            
-            return context
-            
-        except Exception as e:
-            print(f"Error getting context: {str(e)}")
-            return ""
+        
+        return "\n\n".join(formatted_chunks)
 
     def build_vector_db(self):
         """Initialize or rebuild the vector database with current documents."""
@@ -788,7 +831,7 @@ def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
             print(f"Error processing file {file_name}: {str(e)}")
 
     # Create and initialize RAG system
-    rag = SimpleRAG()
+    rag = EnhancedRAG()
     rag.documents = documents
     rag.embeddings_model = embeddings_model
     rag.build_vector_db()
@@ -830,30 +873,61 @@ def clean_response(response: str) -> str:
         return str(e)
 
 
-def chat_response(message, history, loading_state):
-    """Handle chat responses with better error handling and response cleaning."""
+def extract_record_references(query: str) -> List[str]:
+    """Extract potential record IDs from query."""
+    # Pattern for common record ID formats
+    patterns = [
+        r'record[_-]?(\d+)',
+        r'#(\d+)',
+        r'ID[_-]?(\d+)',
+    ]
+    
+    record_ids = []
+    for pattern in patterns:
+        matches = re.finditer(pattern, query, re.IGNORECASE)
+        record_ids.extend(match.group(1) for match in matches)
+    
+    return record_ids
+
+def build_dynamic_prompt(query: str, has_record_refs: bool) -> str:
+    """Build context-aware system prompt."""
+    if has_record_refs:
+        return """You are a helpful assistant with access to specific records and documents. 
+Focus on providing detailed information from the referenced records while maintaining a natural conversational style."""
+    else:
+        return """You are a helpful assistant with access to a database of records and documents. 
+Feel free to explore relevant information across all available records to best answer the question."""
+
+def enhanced_chat_response(message: str, history: List[Tuple[str, str]], rag_system: EnhancedRAG) -> Tuple[List[Tuple[str, str]], str]:
+    """
+    Enhanced chat response handler with better context management and response generation.
+    """
     try:
-        if loading_state:
-            return history + [(message, "Still loading documents. Please wait...")], ""
-            
-        if not user_session_rag or not user_session_rag.vector_store:
-            return history + [(message, "RAG system not properly initialized. Please refresh the page.")], ""
-            
-        context = user_session_rag.get_context_for_query(message, k=3)
+        # Extract potential record references from the query
+        record_ids = extract_record_references(message)
         
-        # Build a more focused prompt
-        system_prompt = """You are a helpful AI assistant. Please provide clear, concise answers based on the available context and your knowledge. If using information from the documents, cite the source."""
+        # Get relevant context
+        context = rag_system.get_context_for_query(message, record_ids=record_ids)
         
-        prompt = f"<s>[INST] {system_prompt}\n\nUser question: {message}\n\nContext from documents:\n{context} [/INST]"
+        # Build dynamic system prompt based on query type
+        system_prompt = build_dynamic_prompt(message, bool(record_ids))
         
+        prompt = f"""<s>[INST] {system_prompt}
+
+User question: {message}
+
+Available context from records:
+{context}
+
+Please provide a natural, informative response that directly addresses the user's question. If referencing specific records or documents, include the relevant Record ID and source. [/INST]"""
+
         response = client.text_generation(
             prompt=prompt,
-            max_new_tokens=1024,  # Reduced to prevent overly long responses
+            max_new_tokens=2048,  # Allow longer responses when needed
             temperature=0.7,
             top_p=0.9,
-            repetition_penalty=1.2,  # Increased to prevent repetition
-            do_sample=True,
-            stop_sequences=["</s>", "[INST]", "User:"]
+            repetition_penalty=1.1,
+            do_sample=True
         )
         
         cleaned_response = clean_response(response)
@@ -862,7 +936,24 @@ def chat_response(message, history, loading_state):
     except Exception as e:
         error_msg = f"Error generating response: {str(e)}"
         print(error_msg)
-        return history + [(message, error_msg)], ""
+        return history + [(message, "I encountered an error while processing your request. Please try again.")], ""
+
+# Update the handle_chat function to use enhanced_chat_response
+def handle_chat(message, history, loading_state):
+    """Handle chat with loading state and enhanced response."""
+    try:
+        if loading_state:
+            return history + [(message, "Still loading documents. Please wait...")], ""
+            
+        if not user_session_rag or not user_session_rag.vector_store:
+            return history + [(message, "RAG system not properly initialized. Please refresh the page.")], ""
+            
+        return enhanced_chat_response(message, history, user_session_rag)
+        
+    except Exception as e:
+        error_msg = f"Error in chat handler: {str(e)}"
+        print(error_msg)
+        return history + [(message, "An error occurred. Please try again.")], ""
 
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
@@ -942,7 +1033,7 @@ with gr.Blocks() as main_demo:
         def handle_chat(message, history, loading_state):
             if loading_state:
                 return history + [(message, "Still loading documents. Please wait...")], ""
-            return chat_response(message, history, loading_state)
+            return handle_chat(message, history, loading_state)
 
         # Button actions
         txt_input.submit(
