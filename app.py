@@ -47,6 +47,8 @@ from huggingface_hub import InferenceClient
 from typing import List, Tuple
 import re
 import unicodedata
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
 
 # Kadi OAuth settings
 load_dotenv()
