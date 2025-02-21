@@ -303,44 +303,64 @@ class SimpleRAG:
         
         for i in range(0, len(contents), batch_size):
             batch = contents[i:i + batch_size]
-            embedding_responses = embeddings_client.post(
-                json={"inputs": batch},
-                task="feature-extraction"
-            )
-            batch_embeddings = np.array(json.loads(embedding_responses.decode()))
-            all_embeddings.append(batch_embeddings)
-            
-        self.embeddings = np.vstack(all_embeddings)
+            try:
+                # Use feature-extraction endpoint correctly
+                embedding_responses = embeddings_client.post(
+                    json={"inputs": batch},
+                    task="feature-extraction"
+                )
+                # The response is already a numpy array, no need for json.loads and decode
+                batch_embeddings = np.array(embedding_responses)
+                all_embeddings.append(batch_embeddings)
+                print(f"Processed batch {i//batch_size + 1}/{(len(contents) + batch_size - 1)//batch_size}")
+            except Exception as e:
+                print(f"Error processing batch {i//batch_size + 1}: {str(e)}")
+                continue
         
-        # Initialize FAISS index
-        dimension = self.embeddings.shape[1]
-        self.index = faiss.IndexFlatL2(dimension)
-        self.index.add(self.embeddings)
-        print(f"Vector database built successfully with {len(self.documents)} documents!")
+        if not all_embeddings:
+            print("No embeddings were generated successfully")
+            return
+        
+        try:
+            self.embeddings = np.vstack(all_embeddings)
+            
+            # Initialize FAISS index
+            dimension = self.embeddings.shape[1]
+            self.index = faiss.IndexFlatL2(dimension)
+            self.index.add(self.embeddings)
+            print(f"Vector database built successfully with {len(self.documents)} documents!")
+        except Exception as e:
+            print(f"Error building vector database: {str(e)}")
+            return
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
         if not self.index:
             return ["Vector database not initialized."]
             
-        # Get query embedding using the same client
-        embedding_responses = embeddings_client.post(
-            json={"inputs": [query]},
-            task="feature-extraction"
-        )
-        query_embedding = np.array(json.loads(embedding_responses.decode()))
-        
-        # Search similar documents
-        D, I = self.index.search(query_embedding, k)
-        
-        # Add metadata to results
-        results_with_metadata = []
-        for idx in I[0]:
-            doc = self.documents[idx]
-            metadata_str = f"\nSource: Record {doc['metadata'].get('record_id', 'unknown')}, File: {doc['metadata'].get('file_name', 'unknown')}"
-            results_with_metadata.append(doc["content"] + metadata_str)
-        
-        return results_with_metadata if results_with_metadata else ["No relevant documents found."]
+        try:
+            # Get query embedding using the same client
+            embedding_response = embeddings_client.post(
+                json={"inputs": query},
+                task="feature-extraction"
+            )
+            # The response is already a numpy array
+            query_embedding = np.array(embedding_response).reshape(1, -1)
+            
+            # Search similar documents
+            D, I = self.index.search(query_embedding, k)
+            
+            # Add metadata to results
+            results_with_metadata = []
+            for idx in I[0]:
+                doc = self.documents[idx]
+                metadata_str = f"\nSource: Record {doc['metadata'].get('record_id', 'unknown')}, File: {doc['metadata'].get('file_name', 'unknown')}"
+                results_with_metadata.append(doc["content"] + metadata_str)
+            
+            return results_with_metadata if results_with_metadata else ["No relevant documents found."]
+        except Exception as e:
+            print(f"Error during document search: {str(e)}")
+            return ["Error occurred while searching documents."]
 
 
 def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
