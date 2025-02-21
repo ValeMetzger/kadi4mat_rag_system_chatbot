@@ -451,99 +451,116 @@ def initialize_rag_system(token, progress=gr.Progress()):
     rag_system = SimpleRAG()
     
     try:
-        # Get all records with retry
-        max_retries = 3
-        retry_delay = 2  # seconds
+        # Get all records
+        print("Fetching records from Kadi...")
+        response = manager.search.search_resources("record", per_page=100)
+        parsed = json.loads(response.content)
         
-        for attempt in range(max_retries):
-            try:
-                response = manager.search.search_resources("record", per_page=100)
-                parsed = json.loads(response.content)
-                
-                print("API Response structure:", list(parsed.keys()))
-                
-                # Extract items and pagination info
-                items = parsed.get("items", [])
-                total_pages = parsed.get("_pagination", {}).get("total_pages", 1)
-                
-                if not items:
-                    print("No records found in initial response")
-                    return "No records found", None
-                    
-                break
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    return f"Failed to initialize: Could not fetch records after {max_retries} attempts. Error: {str(e)}", None
-                print(f"Attempt {attempt + 1} failed, retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
+        # Debug print
+        print(f"Response status: {response.status_code}")
+        print(f"Response content keys: {list(parsed.keys())}")
         
-        progress(0.1, desc="Processing records...")
+        items = parsed.get("items", [])
+        print(f"Found {len(items)} records")
+        
+        if not items:
+            print("No records found in response")
+            return "No records found in Kadi", None
+        
+        progress(0.1, desc=f"Found {len(items)} records to process")
         processed_records = 0
+        processed_files = 0
+        skipped_files = 0
         
         # Process each record
         for item in items:
+            record_id = item.get("identifier")
+            if not record_id:
+                print("Skipping record with no identifier")
+                continue
+                
+            print(f"\nProcessing record: {record_id}")
+            
             try:
-                record_id = item.get("identifier")
-                if not record_id:
-                    continue
-                    
                 record = manager.record(identifier=record_id)
                 
                 # Get files for this record
-                try:
-                    file_list = record.get_filelist().json()
-                    files = file_list.get("items", [])
+                file_list_response = record.get_filelist()
+                print(f"File list response status: {file_list_response.status_code}")
+                
+                file_list = file_list_response.json()
+                files = file_list.get("items", [])
+                print(f"Found {len(files)} files in record {record_id}")
+                
+                # Process each file
+                for file_info in files:
+                    file_name = file_info.get("name", "").lower()
+                    file_id = file_info.get("id")
                     
-                    # Process each file
-                    for file_info in files:
-                        file_name = file_info.get("name")
-                        file_id = file_info.get("id")
+                    if not all([file_name, file_id]):
+                        print(f"Skipping file with incomplete info: {file_name}")
+                        continue
+                    
+                    # Skip non-PDF files
+                    if not file_name.endswith('.pdf'):
+                        skipped_files += 1
+                        print(f"Skipping non-PDF file: {file_name}")
+                        continue
                         
-                        if not all([file_name, file_id]):
-                            continue
+                    print(f"Processing PDF file: {file_name}")
+                    
+                    try:
+                        with tempfile.TemporaryDirectory(prefix="tmp-kadichat-") as temp_dir:
+                            temp_file_location = os.path.join(temp_dir, file_name)
                             
-                        if file_name.lower().endswith('.pdf'):
-                            try:
-                                with tempfile.TemporaryDirectory(prefix="tmp-kadichat-") as temp_dir:
-                                    temp_file_location = os.path.join(temp_dir, file_name)
-                                    record.download_file(file_id, temp_file_location)
-                                    
-                                    # Parse document and add to RAG
-                                    docs = load_and_chunk_pdf(temp_file_location)
-                                    for doc in docs:
-                                        doc["metadata"].update({
-                                            "record_id": record_id,
-                                            "file_name": file_name,
-                                            "record_title": item.get("title", "Unknown")
-                                        })
-                                    rag_system.add_documents(docs)
-                                    print(f"Successfully processed {file_name} from record {record_id}")
-                            except Exception as e:
-                                print(f"Error processing file {file_name}: {str(e)}")
+                            # Download file
+                            print(f"Downloading file to {temp_file_location}")
+                            download_response = record.download_file(file_id, temp_file_location)
+                            
+                            if not os.path.exists(temp_file_location):
+                                print(f"Error: File not downloaded to {temp_file_location}")
                                 continue
                                 
-                except Exception as e:
-                    print(f"Error getting files for record {record_id}: {str(e)}")
-                    continue
-                
-                processed_records += 1
-                progress(0.1 + (0.7 * processed_records/len(items)), desc=f"Processed {processed_records}/{len(items)} records")
-                
+                            # Parse document
+                            docs = load_and_chunk_pdf(temp_file_location)
+                            if docs:
+                                for doc in docs:
+                                    doc["metadata"] = {
+                                        "record_id": record_id,
+                                        "file_name": file_name,
+                                        "record_title": item.get("title", "Unknown")
+                                    }
+                                rag_system.add_documents(docs)
+                                processed_files += 1
+                                print(f"Successfully processed {file_name} - got {len(docs)} chunks")
+                            else:
+                                print(f"No valid content extracted from {file_name}")
+                            
+                    except Exception as e:
+                        print(f"Error processing file {file_name}: {str(e)}")
+                        continue
+                        
             except Exception as e:
-                print(f"Error processing record: {str(e)}")
+                print(f"Error processing record {record_id}: {str(e)}")
                 continue
+            
+            processed_records += 1
+            progress(0.1 + (0.7 * processed_records/len(items)), 
+                    desc=f"Processed {processed_records}/{len(items)} records. Files: {processed_files} processed, {skipped_files} skipped")
         
         # Build vector database if we have documents
         if rag_system.documents:
+            print(f"\nBuilding vector database with {len(rag_system.documents)} documents...")
             progress(0.8, desc="Building vector database...")
             rag_system.build_vector_db()
             progress(1.0, desc="RAG system ready")
-            return f"RAG system initialized with {len(rag_system.documents)} documents from {processed_records} records", rag_system
+            return f"RAG system initialized with {len(rag_system.documents)} documents from {processed_records} records ({processed_files} files processed, {skipped_files} skipped)", rag_system
         else:
+            print("No documents were processed successfully")
             return "No documents were processed successfully", None
             
     except Exception as e:
-        print("Initialization error:", str(e))
+        print(f"Initialization error: {str(e)}")
         return f"Failed to initialize RAG system: {str(e)}", None
 
 
