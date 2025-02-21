@@ -740,29 +740,33 @@ with gr.Blocks() as main_demo:
             submit_btn = gr.Button("Submit")
             clear_btn = gr.Button("Clear Chat")
 
-        # Update chat functionality to check loading state
-        def process_chat(message, history, loading_state):
-            """Process chat messages and return responses."""
-            if loading_state:
+        # Define chat handler function
+        def handle_chat_message(message, history):
+            """Handle chat messages with proper state management."""
+            if loading_state.value:
                 return history + [(message, "Still loading documents. Please wait...")], ""
             
-            # Get the RAG system from the state
-            rag_system = user_session_rag.value
-            
-            if not rag_system or not hasattr(rag_system, 'vector_store'):
+            rag = user_session_rag.value
+            if not rag or not isinstance(rag, ImprovedRAG):
                 return history + [(message, "RAG system not properly initialized. Please refresh the page.")], ""
             
-            return chat_response(message, history, rag_system)
+            try:
+                new_history, _ = chat_response(message, history, rag)
+                return new_history, ""
+            except Exception as e:
+                print(f"Error in chat handler: {str(e)}")
+                return history + [(message, "An error occurred. Please try again.")], ""
 
+        # Update event handlers with correct input/output configuration
         txt_input.submit(
-            fn=process_chat,
-            inputs=[txt_input, chatbot, loading_state],
+            fn=handle_chat_message,
+            inputs=[txt_input, chatbot],
             outputs=[chatbot, txt_input]
         )
         
         submit_btn.click(
-            fn=process_chat,
-            inputs=[txt_input, chatbot, loading_state],
+            fn=handle_chat_message,
+            inputs=[txt_input, chatbot],
             outputs=[chatbot, txt_input]
         )
         
