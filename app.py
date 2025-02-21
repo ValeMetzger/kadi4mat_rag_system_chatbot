@@ -939,20 +939,20 @@ with gr.Blocks() as main_demo:
         )
 
         # Define chat functionality
-        def chat_response(message, history, loading_state):
+        def handle_chat(message, history, loading_state):
             if loading_state:
                 return history + [(message, "Still loading documents. Please wait...")], ""
             return chat_response(message, history, loading_state)
 
         # Button actions
         txt_input.submit(
-            fn=chat_response,
+            fn=handle_chat,
             inputs=[txt_input, chatbot, loading_state],
             outputs=[chatbot, txt_input]
         )
         
         submit_btn.click(
-            fn=chat_response,
+            fn=handle_chat,
             inputs=[txt_input, chatbot, loading_state],
             outputs=[chatbot, txt_input]
         )
