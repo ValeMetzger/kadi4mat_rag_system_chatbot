@@ -566,60 +566,90 @@ def initialize_rag_system(token, progress=gr.Progress()):
 
 def preprocess_response(response: str) -> str:
     """Preprocesses the response to make it more polished."""
-
-    # Placeholder for preprocessing
-
-    # response = response.strip()
-    # response = response.replace("\n\n", "\n")
-    # response = response.replace(" ,", ",")
-    # response = response.replace(" .", ".")
-    # response = " ".join(response.split())
-    # if not any(word in response.lower() for word in ["sorry", "apologize", "empathy"]):
-    #     response = "I'm here to help. " + response
+    if not response or not response.strip():
+        return "I apologize, but I couldn't generate a proper response."
+        
+    # Basic cleaning
+    response = response.strip()
+    
+    # Remove multiple consecutive newlines
+    while "\n\n\n" in response:
+        response = response.replace("\n\n\n", "\n\n")
+        
+    # Ensure the response starts with a proper introduction if it doesn't have one
+    if not any(word in response.lower() for word in ["sorry", "apologize", "based on", "according to", "i found", "i can"]):
+        response = "Based on the available information, " + response
+        
     return response
 
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     """Get respond from LLMs."""
+    
+    try:
+        # Check if RAG system is properly initialized
+        if not user_session_rag or user_session_rag == "placeholder":
+            return history + [("Error: RAG system not initialized properly. Please refresh the page.", "")], ""
+            
+        # Debug print for RAG system state
+        print(f"RAG system documents count: {len(user_session_rag.documents)}")
+        
+        # Get relevant documents
+        print(f"Searching for documents relevant to: {message}")
+        retrieved_docs = user_session_rag.search_documents(message)
+        print(f"Retrieved {len(retrieved_docs)} relevant documents")
+        
+        if not retrieved_docs or retrieved_docs == ["No relevant documents found."]:
+            return history + [(message, "I don't have any relevant information in my knowledge base to answer your question. Could you please try a different question?")], ""
+        
+        # Build context from retrieved documents
+        context = "\n".join(retrieved_docs)
+        print(f"Context length: {len(context)} characters")
+        
+        # Construct prompt
+        system_message = f"""You are a helpful assistant with access to a knowledge base about Kadi records and documents.
+Please answer the user's question based on the following relevant documents. If you can't find relevant information,
+please say so honestly.
 
-    # message is the current input query from user
-    # RAG
-    retrieved_docs = user_session_rag.search_documents(message)
-    context = "\n".join(retrieved_docs)
-    system_message = "You are an assistant to help user to answer question related to Kadi based on Relevant documents.\nRelevant documents: {}".format(
-        context
-    )
-    messages = [{"role": "assistant", "content": system_message}]
+Relevant documents:
+{context}"""
 
-    # Add history for conversational chat, TODO
-    # for val in history:
-    #     #if val[0]:
-    #     messages.append({"role": "user", "content": val[0]})
-    #     #if val[1]:
-    #     messages.append({"role": "assistant", "content": val[1]})
-
-    messages.append({"role": "user", "content": f"\nQuestion: {message}"})
-
-    # print("-----------------")
-    # print(messages)
-    # print("-----------------")
-    # Get anwser from LLM
-    response = client.chat_completion(
-        messages, max_tokens=2048, temperature=0.0
-    )  # , top_p=0.9)
-    response_content = "".join(
-        [
-            choice.message["content"]
-            for choice in response.choices
-            if "content" in choice.message
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": message}
         ]
-    )
-
-    # Process response
-    polished_response = preprocess_response(response_content)
-
-    history.append((message, polished_response))
-    return history, ""
+        
+        # Get answer from LLM
+        print("Requesting response from LLM...")
+        response = client.chat_completion(
+            messages,
+            max_tokens=2048,
+            temperature=0.0,  # Slightly increased for more natural responses
+            top_p=0.9
+        )
+        
+        # Extract response content
+        response_content = ""
+        for choice in response.choices:
+            if "content" in choice.message:
+                response_content += choice.message["content"]
+                
+        if not response_content.strip():
+            print("Warning: Empty response from LLM")
+            return history + [(message, "I apologize, but I wasn't able to generate a proper response. Please try rephrasing your question.")], ""
+            
+        print(f"Generated response length: {len(response_content)} characters")
+        
+        # Process response
+        polished_response = preprocess_response(response_content)
+        
+        # Update history and return
+        history.append((message, polished_response))
+        return history, ""
+        
+    except Exception as e:
+        print(f"Error in respond function: {str(e)}")
+        return history + [(message, f"I apologize, but an error occurred while processing your request: {str(e)}")], ""
 
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
@@ -662,6 +692,21 @@ with gr.Blocks() as main_demo:
             initialize_rag_system,
             inputs=[_state_user_token],
             outputs=[status_box, user_session_rag]
+        )
+
+        # Add this check after RAG initialization
+        main_demo.load(
+            _init_user_token, 
+            None, 
+            _state_user_token
+        ).then(
+            initialize_rag_system,
+            inputs=[_state_user_token],
+            outputs=[status_box, user_session_rag]
+        ).then(
+            check_rag_system,
+            inputs=[user_session_rag],
+            outputs=None
         )
 
         # Actions
