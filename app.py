@@ -1,9 +1,7 @@
 """
 This is a demo to show how to use OAuth2 to connect an application to Kadi.
-
 Read Section "OAuth2 Tokens" in Kadi documents.
 Ref: https://kadi.readthedocs.io/en/stable/httpapi/intro.html#oauth2-tokens
-
 Notes:
 1. register an application in Kadi (Setting->Applications)
     - Name: KadiOAuthTest
@@ -11,7 +9,6 @@ Notes:
     - Redirect URIs: http://localhost:7860/auth
     
 And you will get Client ID and Client Secret, note them down and set in this file.
-
 2. Start this app, and open browser with address "http://localhost:7860/"
   - if you are starting this app on Huggingface, use "start.py" instead.
 """
@@ -33,33 +30,15 @@ from authlib.integrations.starlette_client import OAuth, OAuthError
 from fastapi import Request
 from kadi_apy import KadiManager
 from requests.compat import urljoin
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
-import mimetypes
-from pathlib import Path
-from PyPDF2 import PdfReader
-from docx import Document as DocxReader
-import pandas as pd
-import chromadb
-from transformers import AutoTokenizer
-from huggingface_hub import InferenceClient
-from typing import List, Tuple
-import re
-import unicodedata
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
-from functools import wraps
-import time
-import random
-import asyncio
 
 # Kadi OAuth settings
 load_dotenv()
 KADI_CLIENT_ID = os.environ["KADI_CLIENT_ID"]
 KADI_CLIENT_SECRET = os.environ["KADI_CLIENT_SECRET"]
 SECRET_KEY = os.environ["SECRET_KEY"]
-GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 huggingfacehub_api_token = os.environ["huggingfacehub_api_token"]
 
 from huggingface_hub import login
@@ -90,6 +69,8 @@ oauth.register(
 )
 
 # Global LLM client
+from huggingface_hub import InferenceClient
+
 client = InferenceClient("meta-llama/Meta-Llama-3-8B-Instruct")
 
 # Mixed-usage of huggingface client and local model for showing 2 possibilities
@@ -99,92 +80,6 @@ embeddings_client = InferenceClient(
 embeddings_model = SentenceTransformer(
     "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
 )
-
-# Add these state variables at the global scope
-user_session_rag = gr.State(None)
-loading_state = gr.State(True)
-
-class DocumentProcessor:
-    def __init__(self):
-        self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-    
-    def preprocess_document(self, text: str) -> str:
-        # Remove technical markers and artifacts
-        text = re.sub(r'={2,}.*?={2,}', '', text)  # Remove === sections
-        text = re.sub(r'\[.*?\]', '', text)  # Remove [] sections
-        text = re.sub(r'`{1,}', '', text)     # Remove backticks
-        text = re.sub(r'\s+', ' ', text)      # Normalize whitespace
-        text = text.strip()
-        return text
-    
-    def chunk_document(self, text: str, max_chunk_size: int = 512, min_chunk_size: int = 100) -> List[dict]:
-        """Improved chunking without NLTK dependency."""
-        chunks = []
-        
-        # Split into paragraphs first
-        paragraphs = text.split('\n\n')
-        current_chunk = []
-        current_length = 0
-        
-        for para in paragraphs:
-            para = para.strip()
-            if not para:
-                continue
-            
-            # Get paragraph tokens
-            tokens = self.tokenizer.encode(para)
-            para_length = len(tokens)
-            
-            # If paragraph is too long, split by sentences using regex
-            if para_length > max_chunk_size:
-                # Simple sentence splitting using regex
-                sentences = re.split(r'(?<=[.!?])\s+', para)
-                for sent in sentences:
-                    sent = sent.strip()
-                    if not sent:
-                        continue
-                        
-                    sent_tokens = self.tokenizer.encode(sent)
-                    sent_length = len(sent_tokens)
-                    
-                    if current_length + sent_length > max_chunk_size and current_chunk:
-                        # Store current chunk
-                        chunk_text = ' '.join(current_chunk)
-                        if len(self.tokenizer.encode(chunk_text)) >= min_chunk_size:
-                            chunks.append({
-                                'text': chunk_text,
-                                'token_count': current_length
-                            })
-                        current_chunk = []
-                        current_length = 0
-                    
-                    current_chunk.append(sent)
-                    current_length += sent_length
-            else:
-                # Handle paragraph as a unit if possible
-                if current_length + para_length > max_chunk_size and current_chunk:
-                    chunk_text = ' '.join(current_chunk)
-                    if len(self.tokenizer.encode(chunk_text)) >= min_chunk_size:
-                        chunks.append({
-                            'text': chunk_text,
-                            'token_count': current_length
-                        })
-                    current_chunk = []
-                    current_length = 0
-                
-                current_chunk.append(para)
-                current_length += para_length
-        
-        # Handle remaining text
-        if current_chunk:
-            chunk_text = ' '.join(current_chunk)
-            if len(self.tokenizer.encode(chunk_text)) >= min_chunk_size:
-                chunks.append({
-                    'text': chunk_text,
-                    'token_count': current_length
-                })
-        
-        return chunks
 
 
 # Dependency to get the current user
@@ -198,7 +93,7 @@ def get_user(request: Request):
         return None
     if token:
         try:
-            manager = KadiManager(instance=instance, host=host, pat=token)
+            manager = KadiManager(instance=instance, host=host, token=token)
             user = manager.pat_user
             return user.meta["displayname"]
         except kadi_apy.lib.exceptions.KadiAPYRequestError as e:
@@ -246,153 +141,24 @@ async def login(request: Request):
 @app.route("/auth")
 async def auth(request: Request):
     root_url = gr.route_utils.get_root_url(request, "/auth", None)
+    # print("*****+ in auth")
+    # print("root_urlt", root_url)
+    # print("request", request)
     try:
         access_token = await oauth.kadi4mat.authorize_access_token(request)
         request.session["user_access_token"] = access_token["access_token"]
-
-        # Redirect to Gradio app immediately after authorization
-        return RedirectResponse(url="/gradio")
 
     except OAuthError as e:
         print("Error getting access token", e)
         return RedirectResponse(url="/")
 
+    return RedirectResponse(url="/gradio")
 
-def load_pdf(file_path):
-    """Extract text from a PDF file."""
-    reader = PdfReader(file_path)
-    text = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
-    return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "pdf"}}
-
-def load_docx(file_path):
-    """Extract text from a DOCX file."""
-    doc = DocxReader(file_path)
-    text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
-    return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "docx"}}
-
-def load_excel(file_path):
-    """Extract text from an Excel file."""
-    df = pd.read_excel(file_path)
-    text = df.to_string(index=False)
-    return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "excel"}}
-
-def load_text(file_path):
-    """Read plain text from a TXT file."""
-    with open(file_path, 'r', encoding='utf-8') as f:
-        text = f.read()
-    return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "txt"}}
-
-def load_markdown(file_path):
-    """Convert Markdown content to plain text."""
-    with open(file_path, 'r', encoding='utf-8') as f:
-        text = f.read()
-    return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "md"}}
-
-def load_csv(file_path):
-    """Extract text from a CSV file."""
-    df = pd.read_csv(file_path)
-    text = df.to_string(index=False)
-    return {"source": Path(file_path).name, "content": text, "metadata": {"file_type": "csv"}}
-
-def load_file(file_path: str) -> Dict:
-    """Load and process a file."""
-    file_type = detect_file_type(file_path)
-    
-    try:
-        if file_type == "pdf":
-            with open(file_path, 'rb') as file:
-                pdf = PdfReader(file)
-                text = ""
-                for page in pdf.pages:
-                    text += page.extract_text()
-                return {"content": text, "source": os.path.basename(file_path)}
-                
-        elif file_type == "docx":
-            doc = DocxReader(file_path)
-            text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
-            return {"content": text, "source": os.path.basename(file_path)}
-            
-        elif file_type in ["txt", "md"]:
-            with open(file_path, 'r', encoding='utf-8') as file:
-                return {"content": file.read(), "source": os.path.basename(file_path)}
-                
-        else:
-            raise ValueError(f"Unsupported file type: {file_type}")
-            
-    except Exception as e:
-        print(f"Error loading file {file_path}: {str(e)}")
-        return {"content": "", "source": os.path.basename(file_path)}
-
-def detect_file_type(file_path):
-    """Detect file type using mimetypes and file extension."""
-    mime_type, _ = mimetypes.guess_type(file_path)
-    ext = Path(file_path).suffix.lower()
-    if mime_type == "application/pdf" or ext == ".pdf":
-        return "pdf"
-    elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or ext == ".docx":
-        return "docx"
-    elif mime_type in ["application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] or ext in [".xls", ".xlsx"]:
-        return "excel"
-    elif mime_type == "text/plain" or ext == ".txt":
-        return "txt"
-    elif mime_type == "text/markdown" or ext == ".md":
-        return "md"
-    elif mime_type == "text/csv" or ext == ".csv":
-        return "csv"
-    else:
-        raise ValueError(f"Unsupported file type: {file_path}")
-
-async def process_all_records_and_files(user_token, progress=gr.Progress()):
-    """Process all records and files with improved handling."""
-    try:
-        manager = KadiManager(instance=instance, host=host, pat=user_token)
-        all_records = get_all_records(user_token)
-        
-        rag = ImprovedRAG()
-        total_chunks = 0
-        
-        for i, record_id in enumerate(all_records):
-            try:
-                record = manager.record(identifier=record_id)
-                metadata = {
-                    'record_id': record_id,
-                    'title': record.meta.get('title', ''),
-                    'description': record.meta.get('description', '')
-                }
-                
-                files = record.get_filelist().json()['items']
-                
-                for file_info in files:
-                    try:
-                        with tempfile.TemporaryDirectory() as temp_dir:
-                            file_path = os.path.join(temp_dir, file_info['name'])
-                            record.download_file(file_info['id'], file_path)
-                            
-                            doc = load_file(file_path)
-                            if doc['content']:  # Only process if content was successfully extracted
-                                chunks_added = rag.add_documents([doc], metadata)
-                                total_chunks += chunks_added
-                            
-                    except Exception as e:
-                        print(f"Error processing file {file_info['name']}: {str(e)}")
-                        continue
-                        
-                progress((i + 1) / len(all_records))
-                
-            except Exception as e:
-                print(f"Error processing record {record_id}: {str(e)}")
-                continue
-                
-        return rag, total_chunks
-        
-    except Exception as e:
-        print(f"Error in process_all_records_and_files: {str(e)}")
-        return None, 0
 
 def greet(request: gr.Request):
     """Show greeting message."""
 
-    return f"Welcome to the Kadichat RAG-System, you're logged in as: {request.username}"
+    return f"Welcome to Kadichat, you're logged in as: {request.username}"
 
 
 def get_files_in_record(record_id, user_token, top_k=10):
@@ -440,32 +206,46 @@ def get_files_in_record(record_id, user_token, top_k=10):
     )
 
 
-def get_all_records(user_token) -> List[str]:
+def get_all_records(user_token):
     """Get all record list in Kadi."""
+
     if not user_token:
         return []
 
     manager = KadiManager(instance=instance, host=host, pat=user_token)
-    
+
     host_api = manager.host if manager.host.endswith("/") else manager.host + "/"
     searched_resource = "records"
-    endpoint = urljoin(host_api, searched_resource)
+    endpoint = urljoin(
+        host_api, searched_resource
+    )  # e.g https://demo-kadi4mat.iam.kit.edu/api/" + "records"
 
     response = manager.search.search_resources("record", per_page=100)
     parsed = json.loads(response.content)
-    
+
     total_pages = parsed["_pagination"]["total_pages"]
-    
+
+    def get_page_records(parsed_content):
+        item_identifiers = []
+        items = parsed_content["items"]
+        for item in items:
+            item_identifiers.append(item["identifier"])
+
+        return item_identifiers
+
     all_records_identifiers = []
     for page in range(1, total_pages + 1):
         page_endpoint = endpoint + f"?page={page}&per_page=100"
         response = manager.make_request(page_endpoint)
         parsed = json.loads(response.content)
-        all_records_identifiers.extend([
-            item["identifier"] for item in parsed["items"]
-        ])
+        all_records_identifiers.extend(get_page_records(parsed))
 
-    return all_records_identifiers  # Return list of IDs instead of Dropdown
+    return gr.Dropdown(
+        choices=all_records_identifiers,
+        interactive=True,
+        label="Record Identifier",
+        info="Select record to get file list",
+    )
 
 
 def _init_user_token(request: gr.Request):
@@ -515,269 +295,281 @@ with gr.Blocks() as login_demo:
 
 
 # A simple RAG implementation
-class ImprovedRAG:
-    def __init__(self):
-        self.embeddings_model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
+class SimpleRAG:
+    def __init__(self) -> None:
         self.documents = []
-        self.index = None
+        self.embeddings_model = None
         self.embeddings = None
+        self.index = None
         
-    def add_documents(self, documents: List[dict], metadata: dict) -> int:
-        """Add documents to vector store with metadata."""
-        try:
-            chunks_count = 0
-            # Preprocess documents
-            for doc in documents:
-                content = self._preprocess_text(doc['content'])
-                chunks = self._chunk_text(content)
-                chunks_count += len(chunks)
-                
-                for chunk in chunks:
-                    self.documents.append({
-                        'content': chunk,
-                        'metadata': {
-                            **metadata,
-                            'source': doc.get('source', 'unknown')
-                        }
-                    })
-            
-            # Update embeddings and index
-            self._update_index()
-            return chunks_count
-            
-        except Exception as e:
-            print(f"Error adding documents: {str(e)}")
-            return 0
+    def add_documents(self, new_documents: List[dict]) -> None:
+        """Add new documents to the existing collection"""
+        self.documents.extend(new_documents)
+        
+    def build_vector_db(self) -> None:
+        """Builds a vector database using all documents"""
+        if self.embeddings_model is None:
+            self.embeddings_model = SentenceTransformer(
+                "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
+            )
 
-    def _preprocess_text(self, text: str) -> str:
-        """Clean and normalize text."""
-        text = re.sub(r'={2,}.*?={2,}', '', text)  # Remove technical markers
-        text = re.sub(r'\s+', ' ', text)           # Normalize whitespace
-        return text.strip()
-
-    def _chunk_text(self, text: str, chunk_size: int = 512, overlap: int = 50) -> List[str]:
-        """Chunk text into smaller pieces while preserving context."""
-        chunks = []
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        current_chunk = []
-        current_length = 0
-        
-        for sentence in sentences:
-            sentence_tokens = self.embeddings_model.tokenize([sentence])
-            sentence_length = len(sentence_tokens['input_ids'][0])
-            
-            if current_length + sentence_length > chunk_size and current_chunk:
-                chunks.append(' '.join(current_chunk))
-                # Keep last few sentences for overlap
-                overlap_sentences = current_chunk[-2:] if len(current_chunk) > 2 else current_chunk[-1:]
-                current_chunk = overlap_sentences
-                current_length = sum(len(self.embeddings_model.tokenize([s])['input_ids'][0]) for s in current_chunk)
-            
-            current_chunk.append(sentence)
-            current_length += sentence_length
-        
-        if current_chunk:
-            chunks.append(' '.join(current_chunk))
-        
-        return chunks
-
-    def _update_index(self):
-        """Update FAISS index with new embeddings."""
-        if not self.documents:
-            return
-            
-        texts = [doc['content'] for doc in self.documents]
-        self.embeddings = self.embeddings_model.encode(texts, show_progress_bar=True)
-        
-        # Initialize or update FAISS index
-        if self.index is None:
-            self.index = faiss.IndexFlatL2(self.embeddings.shape[1])
+        self.embeddings = self.embeddings_model.encode(
+            [doc["content"] for doc in self.documents], show_progress_bar=True
+        )
         self.index = faiss.IndexFlatL2(self.embeddings.shape[1])
         self.index.add(np.array(self.embeddings))
+        print("Vector database built successfully!")
 
-    def get_relevant_context(self, query: str, k: int = 3) -> str:
-        """Retrieve relevant context for the query."""
-        try:
-            if not self.index or not self.documents:
-                return ""
-                
-            query_embedding = self.embeddings_model.encode([query])
-            D, I = self.index.search(np.array(query_embedding), k)
-            
-            contexts = []
-            for idx, score in zip(I[0], D[0]):
-                if score < 1.5:  # Similarity threshold
-                    doc = self.documents[idx]
-                    contexts.append(
-                        f"[Source: {doc['metadata'].get('source', 'unknown')}]\n"
-                        f"{doc['content']}\n"
-                    )
-            
-            return "\n---\n".join(contexts) if contexts else ""
-            
-        except Exception as e:
-            print(f"Error retrieving context: {str(e)}")
-            return ""
+    def search_documents(self, query: str, k: int = 4) -> List[str]:
+        """Searches for relevant documents using vector similarity."""
 
-def chat_response(message: str, history: List[Tuple[str, str]], rag_system: ImprovedRAG) -> Tuple[List[Tuple[str, str]], str]:
-    try:
-        context = rag_system.get_relevant_context(message, k=3)
-        
-        prompt = f"""<s>[INST] You are a helpful assistant for answering questions about documents stored in Kadi4mat. 
-Use only the following context to answer the question. If you don't find relevant information in the context, say so clearly.
-
-Context:
-{context}
-
-Question: {message}
-
-Provide a clear, factual answer using only the information from the context above. If you cannot find relevant information, say "I don't have enough information in the provided context to answer this question." [/INST]"""
-
-        response = client.text_generation(
-            prompt=prompt,
-            max_new_tokens=512,
-            temperature=0.7,
-            top_p=0.9,
-            repetition_penalty=1.1,
-            do_sample=True
+        # Use embeddings_client
+        # query_embedding = self.embeddings_model.encode([query], show_progress_bar=False)
+        embedding_responses = embeddings_client.post(
+            json={"inputs": [query]}, task="feature-extraction"
         )
-        
-        response = response.replace("<s>", "").replace("</s>", "")
-        response = response.split("[/INST]")[-1].strip()
-        
-        if not response or len(response) < 10:
-            return history + [(message, "I apologize, but I couldn't generate a proper response. Please try rephrasing your question.")], ""
-            
-        return history + [(message, response)], ""
-        
-    except Exception as e:
-        print(f"Error in chat response: {str(e)}")
-        return history + [(message, "I encountered an error. Please try again.")], ""
+        query_embedding = json.loads(embedding_responses.decode())
+        D, I = self.index.search(np.array(query_embedding), k)
+        results = [self.documents[i]["content"] for i in I[0]]
+        return results if results else ["No relevant documents found."]
 
-def process_chat(message, history, loading_state):
-    """Process chat messages and return responses."""
-    if loading_state:
-        return history + [(message, "Still loading documents. Please wait...")], ""
-    
-    # Get the RAG system from the state
-    rag_system = user_session_rag.value
-    
-    if not rag_system or not hasattr(rag_system, 'vector_store'):
-        return history + [(message, "RAG system not properly initialized. Please refresh the page.")], ""
-    
-    return chat_response(message, history, rag_system)
 
-def handle_chat(message, history, loading_state):
-    """Handle chat with loading state and enhanced response."""
-    try:
-        if loading_state:
-            return history + [(message, "Still loading documents. Please wait...")], ""
-            
-        # Get the RAG system from the state
-        rag_system = user_session_rag.value
+def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
+    """Chunk text into pieces of specified size with overlap, considering separators."""
+
+    # Split the text by the separators
+    for sep in separators:
+        text = text.replace(sep, "\n")
+
+    chunks = []
+    start = 0
+
+    while start < len(text):
+        # Determine the end of the chunk, accounting for overlap and the chunk size
+        end = min(len(text), start + chunk_size)
+
+        # Find a natural break point at the newline to avoid cutting words
+        if end < len(text):
+            while end > start and text[end] != "\n":
+                end -= 1
+
+        chunk = text[start:end].strip()  # Strip trailing whitespace
+        chunks.append(chunk)
+
+        # Move the start position forward by the overlap size
+        start += chunk_size - overlap_size
+
+    return chunks
+
+
+def load_and_chunk_pdf(file_path):
+    """Extracts text from a PDF file and stores it in the property documents by chunks."""
+
+    with pymupdf.open(file_path) as pdf:
+        text = ""
+        for page in pdf:
+            text += page.get_text()
+
+        chunks = chunk_text(text)
+        documents = []
+        for chunk in chunks:
+            documents.append({"content": chunk, "metadata": pdf.metadata})
+
+        return documents
+
+
+def load_pdf(file_path):
+    """Extracts text from a PDF file and stores it in the property documents by page."""
+
+    doc = pymupdf.open(file_path)
+    documents = []
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        text = page.get_text()
+        documents.append({"page": page_num + 1, "content": text})
+    print("PDF processed successfully!")
+    return documents
+
+
+def initialize_rag_system(token, progress=gr.Progress()):
+    """Initialize RAG system with all records from Kadi"""
+    progress(0, desc="Starting RAG initialization")
+    
+    # Create connection to kadi
+    manager = KadiManager(instance=instance, host=host, pat=token)
+    
+    # Get all records
+    host_api = manager.host if manager.host.endswith("/") else manager.host + "/"
+    searched_resource = "records"
+    endpoint = urljoin(host_api, searched_resource)
+    
+    response = manager.search.search_resources("record", per_page=100)
+    parsed = json.loads(response.content)
+    total_pages = parsed["_pagination"]["total_pages"]
+    
+    progress(0.1, desc="Collecting records...")
+    
+    # Initialize RAG
+    rag_system = SimpleRAG()
+    
+    # Process each record
+    for page in range(1, total_pages + 1):
+        progress(0.1 + (0.4 * page/total_pages), desc=f"Processing records page {page}/{total_pages}")
         
-        if not rag_system or not hasattr(rag_system, 'vector_store'):
-            return history + [(message, "RAG system not properly initialized. Please refresh the page.")], ""
-            
-        return chat_response(message, history, rag_system)
+        page_endpoint = endpoint + f"?page={page}&per_page=100"
+        response = manager.make_request(page_endpoint)
+        parsed = json.loads(response.content)
         
-    except Exception as e:
-        error_msg = f"Error in chat handler: {str(e)}"
-        print(error_msg)
-        return history + [(message, "An error occurred. Please try again.")], ""
+        for item in parsed["items"]:
+            record = manager.record(identifier=item["identifier"])
+            file_num = record.get_number_files()
+            
+            # Get all files in the record
+            for p in range(1, (file_num // 100) + 2):
+                files = record.get_filelist(page=p, per_page=100).json()["items"]
+                
+                # Process each file
+                for file_info in files:
+                    file_id = file_info["id"]
+                    file_name = file_info["name"]
+                    
+                    if file_name.lower().endswith('.pdf'):
+                        with tempfile.TemporaryDirectory(prefix="tmp-kadichat-") as temp_dir:
+                            temp_file_location = os.path.join(temp_dir, file_name)
+                            record.download_file(file_id, temp_file_location)
+                            
+                            # Parse document and add to RAG
+                            docs = load_and_chunk_pdf(temp_file_location)
+                            # Add record metadata to each chunk
+                            for doc in docs:
+                                doc["metadata"].update({
+                                    "record_id": item["identifier"],
+                                    "file_name": file_name
+                                })
+                            rag_system.add_documents(docs)
+    
+    progress(0.8, desc="Building vector database...")
+    rag_system.build_vector_db()
+    
+    progress(1.0, desc="RAG system ready")
+    return "RAG system initialized and ready", rag_system
+
+
+def preprocess_response(response: str) -> str:
+    """Preprocesses the response to make it more polished."""
+
+    # Placeholder for preprocessing
+
+    # response = response.strip()
+    # response = response.replace("\n\n", "\n")
+    # response = response.replace(" ,", ",")
+    # response = response.replace(" .", ".")
+    # response = " ".join(response.split())
+    # if not any(word in response.lower() for word in ["sorry", "apologize", "empathy"]):
+    #     response = "I'm here to help. " + response
+    return response
+
+
+def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
+    """Get respond from LLMs."""
+
+    # message is the current input query from user
+    # RAG
+    retrieved_docs = user_session_rag.search_documents(message)
+    context = "\n".join(retrieved_docs)
+    system_message = "You are an assistant to help user to answer question related to Kadi based on Relevant documents.\nRelevant documents: {}".format(
+        context
+    )
+    messages = [{"role": "assistant", "content": system_message}]
+
+    # Add history for conversational chat, TODO
+    # for val in history:
+    #     #if val[0]:
+    #     messages.append({"role": "user", "content": val[0]})
+    #     #if val[1]:
+    #     messages.append({"role": "assistant", "content": val[1]})
+
+    messages.append({"role": "user", "content": f"\nQuestion: {message}"})
+
+    # print("-----------------")
+    # print(messages)
+    # print("-----------------")
+    # Get anwser from LLM
+    response = client.chat_completion(
+        messages, max_tokens=2048, temperature=0.0
+    )  # , top_p=0.9)
+    response_content = "".join(
+        [
+            choice.message["content"]
+            for choice in response.choices
+            if "content" in choice.message
+        ]
+    )
+
+    # Process response
+    polished_response = preprocess_response(response_content)
+
+    history.append((message, polished_response))
+    return history, ""
 
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 app = gr.mount_gradio_app(app, login_demo, path="/main")
 
-# Add this initialization function
-async def initialize_system(request: gr.Request):
-    """Initialize the RAG system for the current session."""
-    try:
-        user_token = request.request.session["user_access_token"]
-        rag_system, total_chunks = await process_all_records_and_files(user_token)
-        
-        # Update the global state
-        user_session_rag.value = rag_system
-        loading_state.value = False
-        
-        return f"System Status: Ready! Processed {total_chunks} document chunks."
-    except Exception as e:
-        loading_state.value = False
-        return f"System Status: Error - {str(e)}"
-
-# Update the main Gradio interface
+# Gradio interface
 with gr.Blocks() as main_demo:
-    # State variables
     _state_user_token = gr.State([])
-    
+    user_session_rag = gr.State("placeholder")
+
     with gr.Row():
         with gr.Column(scale=7):
-            welcome_msg = gr.Markdown("Welcome to Chatbot!")
-            main_demo.load(greet, None, welcome_msg)
+            m = gr.Markdown("Welcome to Chatbot!")
+            main_demo.load(greet, None, m)
         with gr.Column(scale=1):
             gr.Button("Logout", link="/logout")
 
-    loading_status = gr.Markdown("Initializing system...")
-
-    # Add initialization load event here
-    main_demo.load(
-        fn=initialize_system,
-        inputs=None,
-        outputs=loading_status
-    )
-
-    # Chat interface
-    with gr.Tab("Chat"):
-        chatbot = gr.Chatbot(height=600)
-        txt_input = gr.Textbox(
-            show_label=False,
-            placeholder="Type your question here...",
-            lines=2
-        )
-        
+    with gr.Tab("Main"):
         with gr.Row():
-            submit_btn = gr.Button("Submit")
-            clear_btn = gr.Button("Clear Chat")
+            with gr.Column(scale=7):
+                chatbot = gr.Chatbot()
+            with gr.Column(scale=3):
+                status_box = gr.Textbox(
+                    label="Status", 
+                    value="Initializing...", 
+                    interactive=False
+                )
+                
+        with gr.Row():
+            txt_input = gr.Textbox(
+                show_label=False,
+                placeholder="Type your question here...",
+                lines=1
+            )
+            submit_btn = gr.Button("Submit", scale=1)
+            refresh_btn = gr.Button("Refresh Chat", scale=1, variant="secondary")
 
-        # Define chat handler function
-        def handle_chat_message(message, history):
-            """Handle chat messages with proper state management."""
-            if loading_state.value:
-                return history + [(message, "Still loading documents. Please wait...")], ""
-            
-            rag = user_session_rag.value
-            if not rag or not isinstance(rag, ImprovedRAG):
-                return history + [(message, "RAG system not properly initialized. Please refresh the page.")], ""
-            
-            try:
-                new_history, _ = chat_response(message, history, rag)
-                return new_history, ""
-            except Exception as e:
-                print(f"Error in chat handler: {str(e)}")
-                return history + [(message, "An error occurred. Please try again.")], ""
+        # Initialize RAG system on load
+        main_demo.load(_init_user_token, None, _state_user_token).then(
+            initialize_rag_system,
+            inputs=[_state_user_token],
+            outputs=[status_box, user_session_rag]
+        )
 
-        # Update event handlers with correct input/output configuration
+        # Actions
         txt_input.submit(
-            fn=handle_chat_message,
-            inputs=[txt_input, chatbot],
-            outputs=[chatbot, txt_input]
+            fn=respond,
+            inputs=[txt_input, chatbot, user_session_rag],
+            outputs=[chatbot, txt_input],
         )
-        
         submit_btn.click(
-            fn=handle_chat_message,
-            inputs=[txt_input, chatbot],
-            outputs=[chatbot, txt_input]
+            fn=respond,
+            inputs=[txt_input, chatbot, user_session_rag],
+            outputs=[chatbot, txt_input],
         )
-        
-        clear_btn.click(
-            fn=lambda: ([], ""),
-            inputs=None,
-            outputs=[chatbot, txt_input]
-        )
+        refresh_btn.click(lambda: [], None, chatbot)
 
 app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
 
+
 if __name__ == "__main__":
     uvicorn.run(app, port=7860, host="0.0.0.0")
-    
