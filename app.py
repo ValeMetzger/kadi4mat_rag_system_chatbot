@@ -531,7 +531,7 @@ class SimpleRAG:
         self.vector_store = None
         self.documents = []
     
-    def search_documents(self, query: str, k: int = 5, doc_filter: Optional[List[str]] = None) -> List[str]:
+    def search_documents(self, query: str, k: int = 5, doc_filter: Optional[List[str]] = None) -> List[dict]:
         """Search for relevant document chunks."""
         try:
             if not self.vector_store:
@@ -564,12 +564,16 @@ class SimpleRAG:
             print(f"Error searching documents: {str(e)}")
             return []
 
-    def get_context_for_query(self, query: str, doc_filter: Optional[List[str]] = None) -> str:
+    def get_context_for_query(self, query: str, k: int = 5, doc_filter: Optional[List[str]] = None) -> str:
         """
         Get formatted context for a query, optionally filtered by specific documents.
+        Parameters:
+            query (str): The search query
+            k (int): Number of chunks to retrieve
+            doc_filter (Optional[List[str]]): Optional list of document IDs to filter by
         """
         try:
-            relevant_chunks = self.search_documents(query, doc_filter=doc_filter)
+            relevant_chunks = self.search_documents(query, k=k, doc_filter=doc_filter)
             if not relevant_chunks:
                 return ""
             
