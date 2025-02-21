@@ -49,6 +49,9 @@ import re
 import unicodedata
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
+from functools import wraps
+import time
+import random
 
 # Kadi OAuth settings
 load_dotenv()
@@ -339,60 +342,52 @@ def detect_file_type(file_path):
         raise ValueError(f"Unsupported file type: {file_path}")
 
 async def process_all_records_and_files(user_token, progress=gr.Progress()):
-    """Process all records and files for the user."""
-    manager = KadiManager(instance=instance, host=host, pat=user_token)
-    all_records = get_all_records(user_token)
-
-    # Initialize enhanced RAG system
-    rag = EnhancedRAG()
-    total_chunks = 0
-    
-    total_records = len(all_records)
-    print(f"Found {total_records} records to process")
-    progress(0, desc=f"Found {total_records} records to process")
-
-    for i, record_id in enumerate(all_records):
-        try:
-            record = manager.record(identifier=record_id)
-            file_names = [info["name"] for info in record.get_filelist().json()["items"]]
-            print(f"Processing record {record_id} with {len(file_names)} files")
-            
-            documents = []
-            for file_name in file_names:
-                try:
-                    file_id = record.get_file_id(file_name)
-                    with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-                        temp_file_location = os.path.join(temp_dir, file_name)
-                        record.download_file(file_id, temp_file_location)
-                        doc = load_file(temp_file_location)
-                        documents.append(doc)
-                except Exception as e:
-                    print(f"Error processing file {file_name} in record {record_id}: {str(e)}")
-            
-            # Add record with metadata
-            metadata = {
-                "title": record.meta.get("title", ""),
-                "description": record.meta.get("description", ""),
-                "created": record.meta.get("created", ""),
-                "modified": record.meta.get("modified", "")
-            }
-            
-            chunks_added = rag.add_record(record_id, documents, metadata)
-            total_chunks += chunks_added
-            
-            progress((i + 1) / total_records, desc=f"Processing record {i + 1}/{total_records}")
-            
-        except Exception as e:
-            print(f"Error processing record {record_id}: {str(e)}")
-            continue
-
-    print(f"\nProcessed {total_chunks} chunks from {len(all_records)} records")
-    
-    # Update the global RAG system
-    global user_session_rag
-    user_session_rag = rag
-    
-    return total_chunks
+    """Process all records and their files."""
+    try:
+        manager = KadiManager(instance=instance, host=host, pat=user_token)
+        all_records = get_all_records(user_token)
+        
+        rag = EnhancedRAG()
+        total_chunks = 0
+        
+        for i, record_id in enumerate(all_records):
+            try:
+                record = manager.record(identifier=record_id)
+                metadata = {
+                    'record_id': record_id,
+                    'title': record.meta.get('title', ''),
+                    'description': record.meta.get('description', '')
+                }
+                
+                # Get all files in record
+                files = record.get_filelist().json()['items']
+                
+                for file_info in files:
+                    try:
+                        with tempfile.TemporaryDirectory() as temp_dir:
+                            file_path = os.path.join(temp_dir, file_info['name'])
+                            record.download_file(file_info['id'], file_path)
+                            
+                            # Load and process file
+                            doc = load_file(file_path)
+                            chunks_added = rag.add_documents([doc], metadata)
+                            total_chunks += chunks_added
+                            
+                    except Exception as e:
+                        print(f"Error processing file {file_info['name']}: {str(e)}")
+                        continue
+                        
+                progress((i + 1) / len(all_records))
+                
+            except Exception as e:
+                print(f"Error processing record {record_id}: {str(e)}")
+                continue
+                
+        return rag, total_chunks
+        
+    except Exception as e:
+        print(f"Error in process_all_records_and_files: {str(e)}")
+        return None, 0
 
 def greet(request: gr.Request):
     """Show greeting message."""
@@ -534,96 +529,78 @@ class EnhancedRAG:
         self.embeddings = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-mpnet-base-v2"
         )
-        self.vector_store = None
+        self.vector_store = Chroma(
+            collection_name="kadi_records",
+            embedding_function=self.embeddings,
+            persist_directory="./chroma_db"  # Add persistence
+        )
         self.document_processor = DocumentProcessor()
-        
-    def add_record(self, record_id: str, documents: List[dict], metadata: dict = None) -> int:
-        """Add a record's documents to the vector store."""
+
+    def add_documents(self, documents: List[dict], metadata: dict) -> int:
+        """Add documents to vector store with metadata."""
         try:
-            processed_texts = []
+            texts = []
             metadatas = []
             
             for doc in documents:
-                # Simple text preprocessing
+                # Simple preprocessing
                 text = self.document_processor.preprocess_document(doc['content'])
-                chunks = self.document_processor.chunk_document(text)
+                chunks = self.document_processor.chunk_document(text, max_chunk_size=512)
                 
                 for chunk in chunks:
-                    processed_texts.append(chunk['text'])
+                    texts.append(chunk['text'])
                     metadatas.append({
-                        'record_id': record_id,
+                        **metadata,
                         'source': doc.get('source', 'unknown'),
-                        'title': metadata.get('title', ''),
-                        'description': metadata.get('description', '')
+                        'chunk_size': chunk['token_count']
                     })
             
-            if not self.vector_store:
-                self.vector_store = Chroma(
-                    collection_name="kadi_records",
-                    embedding_function=self.embeddings
-                )
-            
-            if processed_texts:
-                self.vector_store.add_texts(
-                    texts=processed_texts,
-                    metadatas=metadatas
-                )
-                
-            return len(processed_texts)
+            if texts:
+                self.vector_store.add_texts(texts=texts, metadatas=metadatas)
+            return len(texts)
             
         except Exception as e:
-            print(f"Error adding record {record_id}: {str(e)}")
+            print(f"Error adding documents: {str(e)}")
             return 0
 
-    def get_relevant_chunks(self, query: str, k: int = 3) -> List[dict]:
-        """Get the most relevant chunks for a query."""
-        if not self.vector_store:
-            return []
+    def get_relevant_context(self, query: str, k: int = 3) -> str:
+        """Get relevant context for query."""
+        try:
+            results = self.vector_store.similarity_search_with_score(query, k=k)
             
-        results = self.vector_store.similarity_search_with_score(
-            query,
-            k=k
-        )
-        
-        chunks = []
-        for doc, score in results:
-            chunks.append({
-                'content': doc.page_content,
-                'metadata': doc.metadata,
-                'score': score
-            })
+            contexts = []
+            for doc, score in results:
+                if score < 1.5:  # Add relevance threshold
+                    contexts.append(f"From {doc.metadata.get('source', 'unknown')}:\n{doc.page_content}")
             
-        return chunks
+            return "\n\n".join(contexts) if contexts else ""
+            
+        except Exception as e:
+            print(f"Error retrieving context: {str(e)}")
+            return ""
 
-def enhanced_chat_response(message: str, history: List[Tuple[str, str]], rag_system: EnhancedRAG) -> Tuple[List[Tuple[str, str]], str]:
-    """Simplified chat response handler."""
+def chat_response(message: str, history: List[Tuple[str, str]], rag_system: EnhancedRAG) -> Tuple[List[Tuple[str, str]], str]:
+    """Generate chat response using RAG."""
     try:
-        # Get relevant chunks
-        relevant_chunks = rag_system.get_relevant_chunks(message)
+        # Get relevant context
+        context = rag_system.get_relevant_context(message)
         
-        if not relevant_chunks:
-            # If no relevant chunks found, let the LLM handle it directly
-            prompt = f"<s>[INST] {message} [/INST]"
-        else:
-            # Build simple prompt with context
-            context = "\n\n".join([
-                f"Document from record {chunk['metadata']['record_id']}:\n{chunk['content']}"
-                for chunk in relevant_chunks
-            ])
-            
-            prompt = f"""<s>[INST] Use the following information to help answer the question:
+        # Build simple prompt
+        if context:
+            prompt = f"""<s>[INST] Use this context to help answer the question:
 
 {context}
 
 Question: {message} [/INST]"""
+        else:
+            prompt = f"<s>[INST] {message} [/INST]"
 
+        # Get response from LLM
         response = client.text_generation(
             prompt=prompt,
             max_new_tokens=1024,
             temperature=0.7,
-            top_p=0.95,
-            repetition_penalty=1.05,
-            do_sample=True
+            repetition_penalty=1.1
         )
         
         # Clean response
@@ -633,8 +610,7 @@ Question: {message} [/INST]"""
         return history + [(message, response)], ""
         
     except Exception as e:
-        error_msg = f"Error generating response: {str(e)}"
-        print(error_msg)
+        print(f"Error in chat response: {str(e)}")
         return history + [(message, "I encountered an error. Please try again.")], ""
 
 # Update the handle_chat function to use enhanced_chat_response
@@ -647,7 +623,7 @@ def handle_chat(message, history, loading_state):
         if not user_session_rag or not user_session_rag.vector_store:
             return history + [(message, "RAG system not properly initialized. Please refresh the page.")], ""
             
-        return enhanced_chat_response(message, history, user_session_rag)
+        return chat_response(message, history, user_session_rag)
         
     except Exception as e:
         error_msg = f"Error in chat handler: {str(e)}"
@@ -736,7 +712,7 @@ with gr.Blocks() as main_demo:
             if not user_session_rag or not user_session_rag.vector_store:
                 return history + [(message, "RAG system not properly initialized. Please refresh the page.")], ""
             
-            return enhanced_chat_response(message, history, user_session_rag)
+            return chat_response(message, history, user_session_rag)
 
         # Button actions
         txt_input.submit(
@@ -770,6 +746,28 @@ with gr.Blocks() as main_demo:
         )
 
 app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
+
+def retry_with_backoff(retries=3, backoff_in_seconds=1):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            x = 0
+            while True:
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    if x == retries:
+                        raise e
+                    sleep = (backoff_in_seconds * 2 ** x + 
+                            random.uniform(0, 1))
+                    time.sleep(sleep)
+                    x += 1
+        return wrapper
+    return decorator
+
+@retry_with_backoff(retries=3)
+async def get_llm_response(prompt):
+    return client.text_generation(prompt=prompt, ...)
 
 if __name__ == "__main__":
     uvicorn.run(app, port=7860, host="0.0.0.0")
