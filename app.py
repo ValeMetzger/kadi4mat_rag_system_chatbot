@@ -1,18 +1,3 @@
-"""
-This is a demo to show how to use OAuth2 to connect an application to Kadi.
-Read Section "OAuth2 Tokens" in Kadi documents.
-Ref: https://kadi.readthedocs.io/en/stable/httpapi/intro.html#oauth2-tokens
-Notes:
-1. register an application in Kadi (Setting->Applications)
-    - Name: KadiOAuthTest
-    - Website URL: http://127.0.0.1:7860
-    - Redirect URIs: http://localhost:7860/auth
-    
-And you will get Client ID and Client Secret, note them down and set in this file.
-2. Start this app, and open browser with address "http://localhost:7860/"
-  - if you are starting this app on Huggingface, use "start.py" instead.
-"""
-
 import json
 import uvicorn
 import gradio as gr
@@ -76,9 +61,6 @@ client = InferenceClient("meta-llama/Meta-Llama-3-8B-Instruct")
 # Mixed-usage of huggingface client and local model for showing 2 possibilities
 embeddings_client = InferenceClient(
     model="sentence-transformers/all-mpnet-base-v2", token=huggingfacehub_api_token
-)
-embeddings_model = SentenceTransformer(
-    "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
 )
 
 
@@ -308,33 +290,48 @@ class SimpleRAG:
         
     def build_vector_db(self) -> None:
         """Builds a vector database using all documents"""
-        if self.embeddings_model is None:
-            self.embeddings_model = SentenceTransformer(
-                "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
+        if not self.documents:
+            print("No documents to build vector database")
+            return
+            
+        # Use embeddings_client for consistency
+        contents = [doc["content"] for doc in self.documents]
+        
+        # Process in batches to avoid memory issues
+        batch_size = 32
+        all_embeddings = []
+        
+        for i in range(0, len(contents), batch_size):
+            batch = contents[i:i + batch_size]
+            embedding_responses = embeddings_client.post(
+                json={"inputs": batch},
+                task="feature-extraction"
             )
-
-        self.embeddings = self.embeddings_model.encode(
-            [doc["content"] for doc in self.documents], show_progress_bar=True
-        )
-        self.index = faiss.IndexFlatL2(self.embeddings.shape[1])
-        self.index.add(np.array(self.embeddings))
-        print("Vector database built successfully!")
+            batch_embeddings = np.array(json.loads(embedding_responses.decode()))
+            all_embeddings.append(batch_embeddings)
+            
+        self.embeddings = np.vstack(all_embeddings)
+        
+        # Initialize FAISS index
+        dimension = self.embeddings.shape[1]
+        self.index = faiss.IndexFlatL2(dimension)
+        self.index.add(self.embeddings)
+        print(f"Vector database built successfully with {len(self.documents)} documents!")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
-        
-        # Get query embedding
+        if not self.index:
+            return ["Vector database not initialized."]
+            
+        # Get query embedding using the same client
         embedding_responses = embeddings_client.post(
-            json={"inputs": [query]}, task="feature-extraction"
+            json={"inputs": [query]},
+            task="feature-extraction"
         )
         query_embedding = np.array(json.loads(embedding_responses.decode()))
         
-        # Reshape the embedding to 2D array as required by FAISS
-        query_embedding = query_embedding.reshape(1, -1)
-        
         # Search similar documents
         D, I = self.index.search(query_embedding, k)
-        results = [self.documents[i]["content"] for i in I[0]]
         
         # Add metadata to results
         results_with_metadata = []
