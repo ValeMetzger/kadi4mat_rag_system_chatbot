@@ -90,15 +90,10 @@ oauth.register(
 )
 
 # Global LLM client
-from huggingface_hub import InferenceClient
-#from langchain_groq import ChatGroq
-
-
 client = InferenceClient(
     model="meta-llama/Meta-Llama-3-8B-Instruct",
     token=huggingfacehub_api_token
 )
-
 
 # Mixed-usage of huggingface client and local model for showing 2 possibilities
 embeddings_client = InferenceClient(
@@ -586,28 +581,45 @@ def chat_response(message: str, history: List[Tuple[str, str]], rag_system: Enha
         # Get relevant context
         context = rag_system.get_relevant_context(message)
         
-        # Build simple prompt
+        # Build a clearer prompt
         if context:
-            prompt = f"""<s>[INST] Use this context to help answer the question:
+            prompt = f"""<s>[INST] You are a helpful assistant answering questions about documents. Use the following context to answer the question, but only if it's relevant. If the context doesn't help answer the question, just answer naturally.
 
+Context:
 {context}
 
-Question: {message} [/INST]"""
-        else:
-            prompt = f"<s>[INST] {message} [/INST]"
+Question: {message}
 
-        # Direct LLM call without retry logic
+Please provide a clear, direct answer. [/INST]"""
+        else:
+            prompt = f"""<s>[INST] You are a helpful assistant. Please answer this question:
+
+{message} [/INST]"""
+
+        # Get response from LLM
         response = client.text_generation(
             prompt=prompt,
             max_new_tokens=1024,
-            temperature=0.7,
-            repetition_penalty=1.1
+            temperature=0.3,  # Lower temperature for more focused responses
+            repetition_penalty=1.1,
+            do_sample=True,
+            top_p=0.9
         )
         
-        # Clean response
+        # Improved response cleaning
         response = response.replace("<s>", "").replace("</s>", "")
         response = response.split("[/INST]")[-1].strip()
         
+        # Additional cleaning
+        response = re.sub(r'={3,}.*?={3,}', '', response)  # Remove === sections
+        response = re.sub(r'\[.*?\]', '', response)  # Remove [...] sections
+        response = re.sub(r'\n\s*\n+', '\n\n', response)  # Clean up multiple newlines
+        response = response.strip()
+        
+        # Validate response
+        if not response or len(response) < 10 or '=====' in response:
+            return history + [(message, "I apologize, but I couldn't generate a proper response. Please try asking your question again.")], ""
+            
         return history + [(message, response)], ""
         
     except Exception as e:
