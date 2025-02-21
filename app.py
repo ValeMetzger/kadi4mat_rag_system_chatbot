@@ -322,16 +322,28 @@ class SimpleRAG:
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
-
-        # Use embeddings_client
-        # query_embedding = self.embeddings_model.encode([query], show_progress_bar=False)
+        
+        # Get query embedding
         embedding_responses = embeddings_client.post(
             json={"inputs": [query]}, task="feature-extraction"
         )
-        query_embedding = json.loads(embedding_responses.decode())
-        D, I = self.index.search(np.array(query_embedding), k)
+        query_embedding = np.array(json.loads(embedding_responses.decode()))
+        
+        # Reshape the embedding to 2D array as required by FAISS
+        query_embedding = query_embedding.reshape(1, -1)
+        
+        # Search similar documents
+        D, I = self.index.search(query_embedding, k)
         results = [self.documents[i]["content"] for i in I[0]]
-        return results if results else ["No relevant documents found."]
+        
+        # Add metadata to results
+        results_with_metadata = []
+        for idx in I[0]:
+            doc = self.documents[idx]
+            metadata_str = f"\nSource: Record {doc['metadata'].get('record_id', 'unknown')}, File: {doc['metadata'].get('file_name', 'unknown')}"
+            results_with_metadata.append(doc["content"] + metadata_str)
+        
+        return results_with_metadata if results_with_metadata else ["No relevant documents found."]
 
 
 def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
