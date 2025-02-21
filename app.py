@@ -588,10 +588,6 @@ Please provide a clear, direct answer. [/INST]"""
         response = client.text_generation(
             prompt=prompt,
             max_new_tokens=1024
-"""             temperature=0.3,  # Lower temperature for more focused responses
-            repetition_penalty=1.1,
-            do_sample=True,
-            top_p=0.9 """
         )
         
         # Improved response cleaning
