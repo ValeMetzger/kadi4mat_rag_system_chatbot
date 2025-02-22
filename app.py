@@ -92,25 +92,31 @@ def count_tokens(text):
     """Count tokens in text using the model's tokenizer."""
     return len(tokenizer.encode(text))
 
-def validate_response(response_content: str) -> bool:
-    """Validate response quality."""
-    # Check minimum length
-    if len(response_content) < 10:
-        return False
+def validate_response(response_content: str) -> Tuple[bool, str]:
+    """Validate response quality and return reason if invalid."""
+    
+    # Check for empty or very short responses
+    if not response_content or len(response_content.strip()) < 10:
+        return False, "Response too short"
         
     # Check for repetitive patterns
     words = response_content.split()
     if len(words) > 3:
         repeated_words = sum(1 for i in range(len(words)-1) if words[i] == words[i+1])
         if repeated_words > len(words) * 0.3:  # More than 30% repeated
-            return False
+            return False, "Too many repeated words"
             
     # Check for common corruption markers
-    corruption_markers = ["the the", "1.", "protein the", "<", ">>"]
-    if any(marker in response_content.lower() for marker in corruption_markers):
-        return False
+    corruption_markers = ["the the", "1.", "protein the", "<", ">>", "```", "{{", "}}"]
+    for marker in corruption_markers:
+        if marker in response_content:
+            return False, f"Contains corruption marker: {marker}"
             
-    return True
+    # Check for coherent sentence structure
+    if not response_content[0].isupper() or not response_content[-1] in '.!?':
+        return False, "Malformed sentence structure"
+        
+    return True, "Valid response"
 
 @rate_limit(max_per_minute=30)
 def get_llm_response(messages):
@@ -577,22 +583,35 @@ def initialize_rag_system(token, progress=gr.Progress()):
 
 def preprocess_response(response: str) -> str:
     """Preprocesses the response to make it more polished."""
-
-    # Placeholder for preprocessing
-
-    # response = response.strip()
-    # response = response.replace("\n\n", "\n")
-    # response = response.replace(" ,", ",")
-    # response = response.replace(" .", ".")
-    # response = " ".join(response.split())
-    # if not any(word in response.lower() for word in ["sorry", "apologize", "empathy"]):
-    #     response = "I'm here to help. " + response
+    
+    # Basic cleanup
+    response = response.strip()
+    
+    # Fix common formatting issues
+    response = response.replace(" ,", ",")
+    response = response.replace(" .", ".")
+    response = response.replace(" !", "!")
+    response = response.replace(" ?", "?")
+    
+    # Remove multiple spaces
+    response = " ".join(response.split())
+    
+    # Ensure proper sentence structure
+    if not response[0].isupper():
+        response = response[0].upper() + response[1:]
+    if not response[-1] in '.!?':
+        response += '.'
+        
+    # Remove any remaining markdown or code formatting
+    response = response.replace('```', '')
+    response = response.replace('`', '')
+    
     return response
 
 
 @rate_limit(max_per_minute=30)
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
-    """Get response from LLMs with improved context management and error handling."""
+    """Get response from LLMs with improved error handling."""
     try:
         # Limit history size
         max_history_items = 3
@@ -633,7 +652,7 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
             messages.append({"role": "assistant", "content": assistant_msg})
         messages.append({"role": "user", "content": message})
         
-        # Get response with retries
+        # Get response with retries and better error handling
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -644,22 +663,28 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
                     if "content" in choice.message
                 ])
                 
-                # Validate response
-                if not validate_response(response_content):
-                    raise ValueError("Generated response failed validation")
+                # Enhanced validation
+                is_valid, reason = validate_response(response_content)
+                if not is_valid:
+                    print(f"Response validation failed: {reason}")
+                    if attempt == max_retries - 1:
+                        return history, f"I apologize, but I'm having trouble generating a proper response ({reason}). Please try again."
+                    continue
                     
+                # Process valid response
+                response_content = preprocess_response(response_content)
                 history.append((message, response_content))
                 return history, ""
                 
             except Exception as e:
                 print(f"Attempt {attempt + 1} failed: {str(e)}")
                 if attempt == max_retries - 1:
-                    return history, "I apologize, but I'm having trouble generating a proper response. Please try again."
+                    return history, "I apologize, but I'm having technical difficulties. Please try again in a moment."
                 time.sleep(1)  # Wait before retry
                 
     except Exception as e:
         print(f"Error in respond function: {str(e)}")
-        return history, "An error occurred while processing your request."
+        return history, "An unexpected error occurred. Please try again."
 
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
