@@ -294,7 +294,6 @@ class SimpleRAG:
             print("No documents to build vector database")
             return
             
-        # Use embeddings_client for consistency
         contents = [doc["content"] for doc in self.documents]
         
         # Process in batches to avoid memory issues
@@ -307,7 +306,11 @@ class SimpleRAG:
                 json={"inputs": batch},
                 task="feature-extraction"
             )
+            # Fix: Properly reshape the embeddings array
             batch_embeddings = np.array(json.loads(embedding_responses.decode()))
+            if len(batch_embeddings.shape) == 3:
+                # If we get shape (batch_size, 1, dim), reshape to (batch_size, dim)
+                batch_embeddings = batch_embeddings.squeeze(1)
             all_embeddings.append(batch_embeddings)
             
         self.embeddings = np.vstack(all_embeddings)
@@ -315,7 +318,7 @@ class SimpleRAG:
         # Initialize FAISS index
         dimension = self.embeddings.shape[1]
         self.index = faiss.IndexFlatL2(dimension)
-        self.index.add(self.embeddings)
+        self.index.add(self.embeddings.astype('float32'))  # Ensure float32 type
         print(f"Vector database built successfully with {len(self.documents)} documents!")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
@@ -329,9 +332,12 @@ class SimpleRAG:
             task="feature-extraction"
         )
         query_embedding = np.array(json.loads(embedding_responses.decode()))
+        if len(query_embedding.shape) == 3:
+            # If we get shape (1, 1, dim), reshape to (1, dim)
+            query_embedding = query_embedding.squeeze(1)
         
         # Search similar documents
-        D, I = self.index.search(query_embedding, k)
+        D, I = self.index.search(query_embedding.astype('float32'), k)
         
         # Add metadata to results
         results_with_metadata = []
