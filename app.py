@@ -311,12 +311,21 @@ class SimpleRAG:
                 )
                 # Convert response to embedding vector
                 embedding = np.array(json.loads(embedding_response.decode()), dtype=np.float32)
-                # Ensure we get a 1D vector
-                embedding = embedding.squeeze()
+                # Handle different possible shapes and ensure consistent output
+                if len(embedding.shape) == 3:
+                    # Shape (1, 1, dim)
+                    embedding = embedding.squeeze(axis=(0, 1))
+                elif len(embedding.shape) == 2:
+                    # Shape (1, dim)
+                    embedding = embedding.squeeze(axis=0)
+                
+                if len(embedding.shape) != 1:
+                    raise ValueError(f"Unexpected embedding shape: {embedding.shape}")
+                    
                 batch_embeddings.append(embedding)
             
-            # Stack batch embeddings
-            batch_embeddings = np.stack(batch_embeddings)
+            # Convert to numpy array
+            batch_embeddings = np.array(batch_embeddings)
             all_embeddings.append(batch_embeddings)
             
         self.embeddings = np.vstack(all_embeddings)
@@ -339,8 +348,15 @@ class SimpleRAG:
         )
         # Convert response to embedding vector
         query_embedding = np.array(json.loads(embedding_response.decode()), dtype=np.float32)
-        # Ensure we get a 1D vector and reshape for FAISS
-        query_embedding = query_embedding.squeeze()
+        # Handle different possible shapes
+        if len(query_embedding.shape) == 3:
+            # Shape (1, 1, dim)
+            query_embedding = query_embedding.squeeze(axis=(0, 1))
+        elif len(query_embedding.shape) == 2:
+            # Shape (1, dim)
+            query_embedding = query_embedding.squeeze(axis=0)
+            
+        # Reshape for FAISS
         query_embedding = query_embedding.reshape(1, -1)
         
         # Search similar documents
