@@ -101,49 +101,35 @@ def validate_response(response_content: str) -> Tuple[bool, str]:
         
     # More lenient minimum length check
     cleaned_content = response_content.strip()
-    if len(cleaned_content) < 5:  # Reduced from 10
+    if len(cleaned_content) < 5:
         return False, "Response too short"
         
     # Check for repetitive patterns - made more lenient
     words = cleaned_content.split()
-    if len(words) > 5:  # Increased threshold
+    if len(words) > 5:
         repeated_words = sum(1 for i in range(len(words)-1) if words[i].lower() == words[i+1].lower())
-        if repeated_words > len(words) * 0.4:  # Increased threshold from 0.3
+        if repeated_words > len(words) * 0.4:
             return False, "Too many repeated words"
             
-    # Rest of validation checks remain the same...
+    # Check for corruption markers
     corruption_markers = [
-        "the the",
-        "protein the",
         "<|",
         "|>",
         "<<",
         ">>",
-        "```",
-        "{{",
-        "}}",
         "\x00",  # null byte
         "\u0000"  # unicode null
     ]
     
-    # Check for numbered list at start of line
-    lines = cleaned_content.split('\n')
-    for line in lines:
-        if line.strip().startswith('1.') and len(line.strip()) <= 3:
-            return False, "Contains bare numbered list marker"
-            
     for marker in corruption_markers:
         if marker in cleaned_content:
             return False, f"Contains corruption marker: {marker}"
             
     # More lenient structure checks
-    if not any(c.isupper() for c in cleaned_content[:20]):  # Increased from 10
+    if not any(c.isupper() for c in cleaned_content[:20]):
         return False, "No capitalization in first 20 characters"
         
-    # Simplified ending punctuation check
-    if not cleaned_content[-1] in '.!?':
-        return False, "Missing ending punctuation"
-        
+    # Remove validation for ending punctuation since we'll handle it in preprocessing
     return True, "Valid response"
 
 @rate_limit(max_per_minute=30)
@@ -152,10 +138,11 @@ def get_llm_response(messages):
     return client.chat_completion(
         messages,
         max_tokens=1024,
-        temperature=0.1,  # Slightly increased from 0.0
-        top_p=0.9,  # Added top_p sampling
-        presence_penalty=0.1,  # Added presence penalty
-        frequency_penalty=0.1  # Added frequency penalty
+        temperature=0.2,  # Slightly increased
+        top_p=0.95,  # Increased
+        presence_penalty=0.2,  # Increased
+        frequency_penalty=0.2,  # Increased
+        stop=["\n\n\n", "```"]  # Added stop sequences
     )
 
 # Dependency to get the current user
@@ -623,16 +610,24 @@ def preprocess_response(response: str) -> str:
     response = response.replace(" .", ".")
     response = response.replace(" !", "!")
     response = response.replace(" ?", "?")
+    response = response.replace(" :", ":")
+    response = response.replace(" ;", ";")
     
-    # Remove multiple spaces
+    # Remove multiple spaces and newlines
     response = " ".join(response.split())
     
     # Ensure proper sentence structure
-    if not response[0].isupper():
+    if response and not response[0].isupper():
         response = response[0].upper() + response[1:]
-    if not response[-1] in '.!?':
-        response += '.'
         
+    # Ensure proper ending punctuation
+    if response and not response[-1] in '.!?':
+        # If ends with other punctuation, replace it
+        if response[-1] in ',;:':
+            response = response[:-1] + '.'
+        else:
+            response += '.'
+            
     # Remove any remaining markdown or code formatting
     response = response.replace('```', '')
     response = response.replace('`', '')
