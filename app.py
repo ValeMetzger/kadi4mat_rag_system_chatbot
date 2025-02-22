@@ -571,20 +571,55 @@ def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"
     return chunks
 
 
-def load_and_chunk_pdf(file_path):
-    """Extracts text from a PDF file and stores it in the property documents by chunks."""
-
-    with pymupdf.open(file_path) as pdf:
-        text = ""
-        for page in pdf:
-            text += page.get_text()
-
-        chunks = chunk_text(text)
-        documents = []
-        for chunk in chunks:
-            documents.append({"content": chunk, "metadata": pdf.metadata})
-
-        return documents
+def load_and_chunk_pdf(file_path, chunk_size=1000, overlap=100):
+    """Extract and chunk text from PDF with improved handling"""
+    try:
+        with pymupdf.open(file_path) as pdf:
+            full_text = ""
+            for page in pdf:
+                text = page.get_text()
+                if text.strip():  # Only add non-empty pages
+                    full_text += text + "\n\n"
+            
+            if not full_text.strip():
+                print(f"Warning: No text extracted from {file_path}")
+                return []
+            
+            # Create chunks with overlap
+            chunks = []
+            start = 0
+            
+            while start < len(full_text):
+                # Find a good break point
+                end = min(start + chunk_size, len(full_text))
+                if end < len(full_text):
+                    # Try to break at sentence boundary
+                    for sep in [". ", ".\n", "\n\n", " "]:
+                        break_point = full_text.rfind(sep, start, end)
+                        if break_point != -1:
+                            end = break_point + 1
+                            break
+                
+                chunk = full_text[start:end].strip()
+                if chunk:  # Only add non-empty chunks
+                    chunks.append({
+                        "content": chunk,
+                        "metadata": {
+                            "start_char": start,
+                            "end_char": end,
+                            "chunk_size": len(chunk)
+                        }
+                    })
+                
+                # Move start position, accounting for overlap
+                start = max(start + 1, end - overlap)
+            
+            print(f"Created {len(chunks)} chunks from PDF")
+            return chunks
+            
+    except Exception as e:
+        print(f"Error processing PDF {file_path}: {str(e)}")
+        return []
 
 
 def load_pdf(file_path):
@@ -601,13 +636,13 @@ def load_pdf(file_path):
 
 
 def initialize_rag_system(token, progress=gr.Progress()):
-    """Initialize RAG system with all records from Kadi"""
+    """Initialize RAG system with improved document processing"""
     progress(0, desc="Starting RAG initialization")
     
     # Create connection to kadi
     manager = KadiManager(instance=instance, host=host, pat=token)
     
-    # Get all records
+    # Get all records with better pagination
     host_api = manager.host if manager.host.endswith("/") else manager.host + "/"
     searched_resource = "records"
     endpoint = urljoin(host_api, searched_resource)
@@ -615,53 +650,95 @@ def initialize_rag_system(token, progress=gr.Progress()):
     response = manager.search.search_resources("record", per_page=100)
     parsed = json.loads(response.content)
     total_pages = parsed["_pagination"]["total_pages"]
+    total_records = parsed["_pagination"]["total"]
     
-    progress(0.1, desc="Collecting records...")
+    progress(0.1, desc=f"Found {total_records} records to process")
     
     # Initialize RAG
     rag_system = SimpleRAG()
+    processed_records = 0
     
-    # Process each record
+    # Process each record with detailed logging
     for page in range(1, total_pages + 1):
-        progress(0.1 + (0.4 * page/total_pages), desc=f"Processing records page {page}/{total_pages}")
+        progress(0.1 + (0.4 * page/total_pages), 
+                desc=f"Processing records page {page}/{total_pages}")
         
         page_endpoint = endpoint + f"?page={page}&per_page=100"
         response = manager.make_request(page_endpoint)
         parsed = json.loads(response.content)
         
         for item in parsed["items"]:
-            record = manager.record(identifier=item["identifier"])
-            file_num = record.get_number_files()
-            
-            # Get all files in the record
-            for p in range(1, (file_num // 100) + 2):
-                files = record.get_filelist(page=p, per_page=100).json()["items"]
+            try:
+                record = manager.record(identifier=item["identifier"])
+                file_num = record.get_number_files()
+                print(f"\nProcessing record {item['identifier']} with {file_num} files")
                 
-                # Process each file
-                for file_info in files:
-                    file_id = file_info["id"]
-                    file_name = file_info["name"]
+                # Calculate pages needed for files
+                pages_needed = (file_num + 99) // 100  # Ceiling division
+                
+                # Get all files in the record
+                for p in range(1, pages_needed + 1):
+                    files = record.get_filelist(page=p, per_page=100).json()["items"]
+                    print(f"Processing file page {p}/{pages_needed} ({len(files)} files)")
                     
-                    if file_name.lower().endswith('.pdf'):
-                        with tempfile.TemporaryDirectory(prefix="tmp-kadichat-") as temp_dir:
-                            temp_file_location = os.path.join(temp_dir, file_name)
-                            record.download_file(file_id, temp_file_location)
-                            
-                            # Parse document and add to RAG
-                            docs = load_and_chunk_pdf(temp_file_location)
-                            # Add record metadata to each chunk
-                            for doc in docs:
-                                doc["metadata"].update({
-                                    "record_id": item["identifier"],
-                                    "file_name": file_name
-                                })
-                            rag_system.add_documents(docs)
+                    # Process each file
+                    for file_info in files:
+                        file_id = file_info["id"]
+                        file_name = file_info["name"]
+                        
+                        if file_name.lower().endswith('.pdf'):
+                            print(f"Processing PDF: {file_name}")
+                            with tempfile.TemporaryDirectory(prefix="tmp-kadichat-") as temp_dir:
+                                temp_file_location = os.path.join(temp_dir, file_name)
+                                try:
+                                    record.download_file(file_id, temp_file_location)
+                                    
+                                    # Parse document with chunk size validation
+                                    docs = load_and_chunk_pdf(temp_file_location)
+                                    print(f"Generated {len(docs)} chunks from {file_name}")
+                                    
+                                    # Add record metadata to each chunk
+                                    for doc in docs:
+                                        doc["metadata"] = {
+                                            "record_id": item["identifier"],
+                                            "file_name": file_name,
+                                            "chunk_size": len(doc["content"])
+                                        }
+                                    
+                                    # Add chunks to RAG system
+                                    rag_system.add_documents(docs)
+                                    
+                                except Exception as e:
+                                    print(f"Error processing file {file_name}: {str(e)}")
+                                    continue
+                
+                processed_records += 1
+                print(f"Processed {processed_records}/{total_records} records")
+                
+            except Exception as e:
+                print(f"Error processing record {item['identifier']}: {str(e)}")
+                continue
     
     progress(0.8, desc="Building vector database...")
-    rag_system.build_vector_db()
     
-    progress(1.0, desc="RAG system ready")
-    return "RAG system initialized and ready", rag_system
+    try:
+        rag_system.build_vector_db()
+        print(f"Successfully built index with {len(rag_system.documents)} documents")
+        
+        # Validate index
+        if len(rag_system.documents) == 0:
+            raise ValueError("No documents were processed successfully")
+            
+        # Test search functionality
+        test_results = rag_system.search_documents("test query")
+        print(f"Index validation: retrieved {len(test_results)} results")
+        
+    except Exception as e:
+        print(f"Error building vector database: {str(e)}")
+        raise
+    
+    progress(1.0, desc=f"RAG system ready with {len(rag_system.documents)} documents")
+    return f"RAG system initialized with {len(rag_system.documents)} documents", rag_system
 
 
 def preprocess_response(response: str) -> str:
