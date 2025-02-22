@@ -283,19 +283,18 @@ class SimpleRAG:
         self.embeddings_model = None
         self.embeddings = None
         self.index = None
-        self.max_context_length = 4096  # Maximum context length for LLM
-        self.embedding_dim = None  # Store embedding dimension
+        self.max_context_length = 4096
+        self.embedding_dim = 768  # Base embedding dimension for the model
         
     def add_documents(self, new_documents: List[dict]) -> None:
         """Add new documents to the existing collection"""
         self.documents.extend(new_documents)
         
-    def validate_embedding(self, embedding: np.ndarray, expected_dim: int) -> np.ndarray:
+    def validate_embedding(self, embedding: np.ndarray) -> np.ndarray:
         """Validate and normalize embedding shape"""
-        if embedding.ndim > 2:
-            print(f"Warning: Embedding has too many dimensions: {embedding.ndim}")
-        if embedding.shape[-1] != expected_dim:
-            print(f"Warning: Unexpected embedding dimension: {embedding.shape}")
+        # Handle 3D embeddings by taking mean across sequence length
+        if embedding.ndim == 3:
+            embedding = np.mean(embedding, axis=1)
         return embedding.flatten()
         
     def build_vector_db(self) -> None:
@@ -306,19 +305,6 @@ class SimpleRAG:
             
         contents = [doc["content"] for doc in self.documents]
         
-        # First get the dimension of embeddings by processing one sample
-        try:
-            sample_response = embeddings_client.post(
-                json={"inputs": contents[0]},
-                task="feature-extraction"
-            )
-            sample_embedding = np.array(json.loads(sample_response.decode()), dtype=np.float32)
-            self.embedding_dim = sample_embedding.flatten().shape[0]
-            print(f"Embedding dimension: {self.embedding_dim}")
-        except Exception as e:
-            print(f"Error determining embedding dimension: {str(e)}")
-            raise
-        
         # Process in batches to avoid memory issues
         batch_size = 32
         all_embeddings = []
@@ -327,20 +313,16 @@ class SimpleRAG:
             batch = contents[i:i + batch_size]
             batch_embeddings = np.zeros((len(batch), self.embedding_dim), dtype=np.float32)
             
-            # Process each text individually
             for j, text in enumerate(batch):
                 try:
                     embedding_response = embeddings_client.post(
                         json={"inputs": text},
                         task="feature-extraction"
                     )
-                    # Convert response to embedding vector and ensure consistent shape
                     embedding = np.array(json.loads(embedding_response.decode()), dtype=np.float32)
-                    print(f"Raw embedding shape: {embedding.shape}")
+                    embedding = self.validate_embedding(embedding)
                     
-                    embedding = self.validate_embedding(embedding, self.embedding_dim)
-                    print(f"Flattened embedding shape: {embedding.shape}")
-                    
+                    # Ensure correct dimension
                     if embedding.shape[0] != self.embedding_dim:
                         print(f"Warning: Inconsistent embedding dimension for document {i+j}")
                         continue
@@ -356,13 +338,9 @@ class SimpleRAG:
         
         try:
             self.embeddings = np.vstack(all_embeddings)
-            
-            # Initialize FAISS index
-            dimension = self.embeddings.shape[1]
-            self.index = faiss.IndexFlatL2(dimension)
+            self.index = faiss.IndexFlatL2(self.embedding_dim)
             self.index.add(self.embeddings)
             print(f"Vector database built successfully with {len(self.documents)} documents!")
-            print(f"Final embedding shape: {self.embeddings.shape}")
             
         except Exception as e:
             print(f"Error building index: {str(e)}")
@@ -383,7 +361,7 @@ class SimpleRAG:
             query_embedding = np.array(json.loads(embedding_response.decode()), dtype=np.float32)
             print(f"Raw query embedding shape: {query_embedding.shape}")
             
-            query_embedding = self.validate_embedding(query_embedding, self.embedding_dim)
+            query_embedding = self.validate_embedding(query_embedding)
             print(f"Flattened query embedding shape: {query_embedding.shape}")
             
             # Ensure correct shape for FAISS
@@ -578,13 +556,12 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
         messages = [{"role": "assistant", "content": system_message}]
         messages.append({"role": "user", "content": f"\nQuestion: {message}"})
         
-        # Get answer from LLM with reduced tokens and retry logic
+        # Get answer from LLM
         try:
             response = client.chat_completion(
                 messages,
                 max_tokens=1024,
-                temperature=0.0,
-                max_retries=3
+                temperature=0.0
             )
             response_content = "".join(
                 [
