@@ -476,34 +476,40 @@ class SimpleRAG:
             raise
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
-        """Searches for relevant documents using vector similarity."""
+        """Searches for relevant documents with improved logging."""
         if not self.index:
+            print("Warning: Vector database not initialized")
             return ["Vector database not initialized."]
-            
+        
         try:
+            # Log document count
+            print(f"Total documents in index: {len(self.documents)}")
+            
             # Get query embedding
             embedding_response = embeddings_client.post(
                 json={"inputs": query},
                 task="feature-extraction"
             )
-            # Convert response to embedding vector
             query_embedding = np.array(json.loads(embedding_response.decode()), dtype=np.float32)
-            print(f"Raw query embedding shape: {query_embedding.shape}")
             
             query_embedding = self.validate_embedding(query_embedding)
-            print(f"Flattened query embedding shape: {query_embedding.shape}")
-            
-            # Ensure correct shape for FAISS
             query_embedding = query_embedding.reshape(1, -1)
             
-            # Search similar documents
+            # Search and log distances
             D, I = self.index.search(query_embedding, k)
+            print(f"Search distances: {D[0]}")  # Lower distances = better matches
             
-            # Add metadata to results
             results_with_metadata = []
-            for idx in I[0]:
-                if idx < len(self.documents):  # Guard against index out of bounds
+            for i, idx in enumerate(I[0]):
+                if idx < len(self.documents):
                     doc = self.documents[idx]
+                    # Log each retrieved document
+                    print(f"\nDocument {i+1} (distance: {D[0][i]:.3f}):")
+                    print(f"Record ID: {doc['metadata'].get('record_id', 'unknown')}")
+                    print(f"File: {doc['metadata'].get('file_name', 'unknown')}")
+                    print(f"Content length: {len(doc['content'])} chars")
+                    print(f"First 100 chars: {doc['content'][:100]}...")
+                    
                     metadata_str = f"\nSource: Record {doc['metadata'].get('record_id', 'unknown')}, File: {doc['metadata'].get('file_name', 'unknown')}"
                     results_with_metadata.append(doc["content"] + metadata_str)
             
@@ -697,57 +703,69 @@ def preprocess_response(response: str) -> str:
 
 @rate_limit(max_per_minute=30)
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag) -> Tuple[List[Tuple[str, str]], str]:
-    """Enhanced response handler with context window management"""
+    """Enhanced response handler with better context management."""
     
     try:
         if not message.strip():
             return history, "Please provide a valid message."
             
-        # Get relevant documents
+        # Get and log relevant documents
         try:
             retrieved_docs = user_session_rag.search_documents(message)
+            print(f"\nRetrieved {len(retrieved_docs)} documents")
         except Exception as e:
             print(f"Document retrieval error: {str(e)}")
             retrieved_docs = []
             
-        # Manage context window size
-        max_context_tokens = 4096  # LLaMA 3 8B context window
+        # Improved context management
+        max_context_tokens = 3072  # Reduced from 4096 to leave more room
         max_response_tokens = 1024
+        system_message_tokens = 200  # Approximate
         
-        # Reserve tokens for system message and response
-        available_tokens = max_context_tokens - max_response_tokens - 500  # Buffer for system message
+        available_tokens = max_context_tokens - max_response_tokens - system_message_tokens
         
-        # Build context within token limit
-        context = ""
+        # Build context with token counting
+        context_parts = []
         total_tokens = 0
         
         for doc in retrieved_docs[:3]:
             doc_tokens = count_tokens(doc)
-            if total_tokens + doc_tokens > available_tokens:
-                break
-            context += doc + "\n\n"
-            total_tokens += doc_tokens
+            print(f"Document tokens: {doc_tokens}")
             
-        # Construct messages with token tracking
+            if total_tokens + doc_tokens > available_tokens:
+                print(f"Skipping document, would exceed token limit ({total_tokens + doc_tokens} > {available_tokens})")
+                break
+                
+            context_parts.append(doc)
+            total_tokens += doc_tokens
+            print(f"Added document. Total tokens: {total_tokens}")
+            
+        context = "\n\n---\n\n".join(context_parts)
+        
+        # More focused system message
         system_message = (
-            "You are a helpful assistant. "
-            f"Use this context to inform your response:\n{context}\n\n"
-            "If you're unsure or the context doesn't help, say so clearly."
+            "You are a helpful assistant for answering questions about documents. "
+            "Base your response on the following context documents, separated by '---':\n\n"
+            f"{context}\n\n"
+            "If the context doesn't contain relevant information, say so clearly. "
+            "Keep your response focused and avoid repetition or markdown formatting."
         )
         
         messages = [{"role": "system", "content": system_message}]
         
-        # Add recent history within token limits
+        # Add limited history
         history_tokens = 0
         recent_history = []
         
-        for msg in reversed(history[-5:]):  # Last 5 messages
+        for msg in reversed(history[-3:]):  # Reduced from 5 to 3 messages
             msg_tokens = count_tokens(msg[0]) + count_tokens(msg[1])
-            if history_tokens + msg_tokens > available_tokens // 2:  # Use half for history
+            if history_tokens + msg_tokens > available_tokens // 3:  # Reduced history allocation
                 break
             recent_history.insert(0, msg)
             history_tokens += msg_tokens
             
+        print(f"History tokens: {history_tokens}")
+        
         for user_msg, assistant_msg in recent_history:
             messages.extend([
                 {"role": "user", "content": user_msg},
@@ -755,6 +773,10 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag) -> T
             ])
             
         messages.append({"role": "user", "content": message})
+        
+        # Log total context size
+        total_prompt_tokens = sum(count_tokens(m["content"]) for m in messages)
+        print(f"Total prompt tokens: {total_prompt_tokens}")
         
         # Get response with error handling
         try:
@@ -765,6 +787,7 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag) -> T
         except ValueError as e:
             return history, f"Response generation error: {str(e)}"
         except Exception as e:
+            print(f"Response error: {str(e)}")
             return history, "An error occurred. Please try again."
             
     except Exception as e:
