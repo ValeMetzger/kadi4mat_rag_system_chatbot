@@ -29,7 +29,7 @@ numpy>=1.21.0
 requests>=2.26.0
 
 # Kadi4mat Client
-kadi-apy>=1.0.0
+kadi-apy>=0.45.0  # Updated to latest available version
 
 # Optional but recommended
 flash-attention>=2.0.0  # For improved transformer performance
