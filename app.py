@@ -18,7 +18,7 @@ from requests.compat import urljoin
 from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 import time
 from functools import wraps
 
@@ -59,8 +59,28 @@ oauth.register(
 # Global LLM client
 from huggingface_hub import InferenceClient
 
-client = InferenceClient("meta-llama/Meta-Llama-3-8B-Instruct")
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
+# Initialize LLaMA 3.1 components
+MODEL_ID = "meta-llama/Llama-3.1-8B"
+
+try:
+    # Initialize pipeline for text generation
+    llm_pipeline = pipeline(
+        "text-generation",
+        model=MODEL_ID,
+        token=huggingfacehub_api_token,
+        trust_remote_code=True
+    )
+    
+    # Initialize tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(
+        MODEL_ID,
+        token=huggingfacehub_api_token,
+        trust_remote_code=True
+    )
+    
+except Exception as e:
+    print(f"Error initializing LLaMA 3.1: {str(e)}")
+    raise
 
 # Mixed-usage of huggingface client and local model for showing 2 possibilities
 embeddings_client = InferenceClient(
@@ -135,44 +155,56 @@ def validate_response(response_content: str) -> Tuple[bool, str]:
 
 @rate_limit(max_per_minute=30)
 def get_llm_response(messages: List[dict], max_retries: int = 3) -> str:
-    """Enhanced LLM response handling with better error checking"""
+    """Enhanced LLM response handling using LLaMA 3.1"""
     
     for attempt in range(max_retries):
         try:
-            # Add temperature jitter
-            temperature = 0.2 + (attempt * 0.1)
+            # Format messages into a prompt
+            formatted_prompt = ""
+            for msg in messages:
+                role = msg["role"]
+                content = msg["content"]
+                if role == "system":
+                    formatted_prompt += f"System: {content}\n\n"
+                elif role == "user":
+                    formatted_prompt += f"User: {content}\n"
+                elif role == "assistant":
+                    formatted_prompt += f"Assistant: {content}\n"
             
-            response = client.chat_completion(
-                messages,
-                max_tokens=1024,
-                temperature=min(temperature, 0.7),
+            formatted_prompt += "Assistant: "
+            
+            # Generate response
+            response = llm_pipeline(
+                formatted_prompt,
+                max_new_tokens=1024,
+                temperature=0.2 + (attempt * 0.1),  # Temperature jitter
                 top_p=0.95,
-                presence_penalty=0.2,
-                frequency_penalty=0.2,
-                stop=["\n\n\n", "```", "<|", "|>"]
+                repetition_penalty=1.2,
+                do_sample=True,
+                num_return_sequences=1,
+                stop_sequences=["\n\n\n", "```", "<|", "|>", "User:", "System:"]
             )
             
-            # Validate response structure
-            if not response.choices or not response.choices[0].message:
-                raise ValueError("Invalid response structure")
-                
-            response_content = response.choices[0].message["content"]
+            # Extract response text
+            response_text = response[0]["generated_text"]
             
-            # Validate response content
+            # Remove the input prompt from the response
+            response_content = response_text[len(formatted_prompt):].strip()
+            
+            # Validate response
             is_valid, reason = validate_response(response_content)
             if not is_valid:
                 print(f"Attempt {attempt + 1} failed validation: {reason}")
                 if attempt == max_retries - 1:
                     raise ValueError(f"Failed to generate valid response: {reason}")
                 continue
-                
+            
             return preprocess_response(response_content)
             
         except Exception as e:
             print(f"Attempt {attempt + 1} failed: {str(e)}")
             if attempt == max_retries - 1:
                 raise
-            # Exponential backoff between retries
             time.sleep(2 ** attempt)
     
     raise RuntimeError("Failed to get valid response after all retries")
@@ -650,19 +682,22 @@ def initialize_rag_system(token, progress=gr.Progress()):
     response = manager.search.search_resources("record", per_page=100)
     parsed = json.loads(response.content)
     
-    # Get pagination info
-    total_pages = parsed["_pagination"]["total_pages"]
-    per_page = parsed["_pagination"]["per_page"]
-    current_page = parsed["_pagination"]["current_page"]
+    # Get pagination info - handle missing fields
+    pagination = parsed.get("_pagination", {})
+    total_pages = pagination.get("total_pages", 1)
+    per_page = pagination.get("per_page", 100)
     
-    # Calculate total records
-    total_records = (total_pages - 1) * per_page
-    if current_page == total_pages:
-        total_records += len(parsed["items"])
+    # Get initial page items count
+    initial_items = len(parsed.get("items", []))
+    
+    # Estimate total records more safely
+    if total_pages == 1:
+        total_records = initial_items
     else:
-        total_records += per_page
+        # Estimate based on full pages plus last page
+        total_records = (total_pages - 1) * per_page + initial_items
     
-    progress(0.1, desc=f"Found {total_records} records to process")
+    progress(0.1, desc=f"Found approximately {total_records} records to process")
     
     # Initialize RAG
     rag_system = SimpleRAG()
@@ -674,15 +709,24 @@ def initialize_rag_system(token, progress=gr.Progress()):
             progress(0.1 + (0.4 * page/total_pages), 
                     desc=f"Processing records page {page}/{total_pages}")
             
-            page_endpoint = endpoint + f"?page={page}&per_page=100"
-            response = manager.make_request(page_endpoint)
-            parsed = json.loads(response.content)
+            # Get page data
+            if page == 1:
+                # Use already fetched first page
+                page_data = parsed
+            else:
+                page_endpoint = endpoint + f"?page={page}&per_page={per_page}"
+                response = manager.make_request(page_endpoint)
+                page_data = json.loads(response.content)
             
-            if not parsed.get("items"):
+            items = page_data.get("items", [])
+            if not items:
                 print(f"Warning: No items found on page {page}")
                 continue
+                
+            print(f"Processing page {page} with {len(items)} records")
             
-            for item in parsed["items"]:
+            # Process each record
+            for item in items:
                 try:
                     record = manager.record(identifier=item["identifier"])
                     file_num = record.get_number_files()
@@ -976,25 +1020,26 @@ app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_us
 
 
 def validate_model_tokenizer():
-    """Validate model and tokenizer compatibility"""
+    """Validate LLaMA 3.1 model and tokenizer compatibility"""
     try:
-        # Test tokenization and detokenization
+        # Test tokenization
         test_text = "Hello, this is a test."
         tokens = tokenizer.encode(test_text)
         decoded = tokenizer.decode(tokens)
         if not decoded.strip():
             raise ValueError("Tokenizer validation failed")
-            
-        # Test model basic inference
-        response = client.chat_completion(
-            [{"role": "user", "content": test_text}],
-            max_tokens=10
+        
+        # Test generation
+        response = llm_pipeline(
+            test_text,
+            max_new_tokens=10,
+            num_return_sequences=1
         )
-        if not response.choices[0].message["content"].strip():
+        if not response[0]["generated_text"].strip():
             raise ValueError("Model validation failed")
-            
+        
     except Exception as e:
-        print(f"Model/tokenizer validation error: {str(e)}")
+        print(f"LLaMA 3.1 validation error: {str(e)}")
         raise
 
 # Call validation during startup
