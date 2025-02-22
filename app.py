@@ -23,6 +23,7 @@ import time
 from functools import wraps
 import transformers
 import torch
+from accelerate import init_empty_weights
 
 # Kadi OAuth settings
 load_dotenv()
@@ -65,20 +66,26 @@ from huggingface_hub import InferenceClient
 MODEL_ID = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 
 try:
-    # Initialize pipeline with bfloat16 and auto device mapping
+    # Initialize pipeline with more specific configuration
     llm_pipeline = transformers.pipeline(
         "text-generation",
         model=MODEL_ID,
         token=huggingfacehub_api_token,
-        model_kwargs={"torch_dtype": torch.bfloat16},
+        torch_dtype=torch.bfloat16,
         device_map="auto",
+        model_kwargs={
+            "low_cpu_mem_usage": True,
+            "use_safetensors": True,
+            "use_flash_attention_2": True
+        }
     )
     
-    # Initialize tokenizer
+    # Initialize tokenizer with specific settings
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         MODEL_ID,
         token=huggingfacehub_api_token,
-        trust_remote_code=True
+        trust_remote_code=True,
+        use_fast=True
     )
     
 except Exception as e:
