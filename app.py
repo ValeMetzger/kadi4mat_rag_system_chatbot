@@ -18,7 +18,7 @@ from requests.compat import urljoin
 from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+from transformers import AutoTokenizer
 import time
 from functools import wraps
 import transformers
@@ -62,34 +62,27 @@ oauth.register(
 # Global LLM client
 from huggingface_hub import InferenceClient
 
-# Initialize LLM components
+# Initialize LLM components using InferenceClient instead of pipeline
+from huggingface_hub import InferenceClient
+
 MODEL_ID = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 
 try:
-    # Initialize pipeline with more specific configuration
-    llm_pipeline = transformers.pipeline(
-        "text-generation",
-        model=MODEL_ID,
-        token=huggingfacehub_api_token,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        model_kwargs={
-            "low_cpu_mem_usage": True,
-            "use_safetensors": True,
-            "use_flash_attention_2": True
-        }
+    # Use InferenceClient for API access
+    llm_client = InferenceClient(
+        MODEL_ID,
+        token=huggingfacehub_api_token
     )
     
-    # Initialize tokenizer with specific settings
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
+    # Initialize tokenizer (needed only for token counting)
+    tokenizer = AutoTokenizer.from_pretrained(
         MODEL_ID,
         token=huggingfacehub_api_token,
-        trust_remote_code=True,
-        use_fast=True
+        trust_remote_code=True
     )
     
 except Exception as e:
-    print(f"Error initializing LLaMA 3.1: {str(e)}")
+    print(f"Error initializing LLM client: {str(e)}")
     raise
 
 # Mixed-usage of huggingface client and local model for showing 2 possibilities
@@ -165,11 +158,11 @@ def validate_response(response_content: str) -> Tuple[bool, str]:
 
 @rate_limit(max_per_minute=30)
 def get_llm_response(messages: List[dict], max_retries: int = 3) -> str:
-    """Enhanced LLM response handling using LLaMA 3.1 pipeline"""
+    """Enhanced LLM response handling using Inference API"""
     
     for attempt in range(max_retries):
         try:
-            # Format messages into LLaMA 3.1 chat format
+            # Format messages into chat format
             formatted_prompt = ""
             for msg in messages:
                 role = msg["role"]
@@ -181,30 +174,19 @@ def get_llm_response(messages: List[dict], max_retries: int = 3) -> str:
                 elif role == "assistant":
                     formatted_prompt += f"{content} </s>"
             
-            # Generate response
-            outputs = llm_pipeline(
+            # Use text-generation endpoint
+            response = llm_client.text_generation(
                 formatted_prompt,
                 max_new_tokens=1024,
-                temperature=0.2 + (attempt * 0.1),  # Temperature jitter
+                temperature=0.2 + (attempt * 0.1),
                 top_p=0.95,
                 repetition_penalty=1.2,
                 do_sample=True,
-                eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.pad_token_id
+                stop_sequences=["</s>", "[INST]", "\n\n\n"]
             )
             
-            # Extract and clean response
-            response_text = outputs[0]["generated_text"]
-            
-            # Remove the input prompt from the response
-            response_content = response_text[len(formatted_prompt):].strip()
-            
-            # Remove any system or instruction tags
-            response_content = response_content.replace("[INST]", "")
-            response_content = response_content.replace("[/INST]", "")
-            response_content = response_content.replace("<<SYS>>", "")
-            response_content = response_content.replace("<</SYS>>", "")
-            response_content = response_content.replace("</s>", "")
+            # Clean up response
+            response_content = response.strip()
             
             # Validate response
             is_valid, reason = validate_response(response_content)
@@ -1045,7 +1027,7 @@ def validate_model_tokenizer():
             raise ValueError("Tokenizer validation failed")
         
         # Test generation
-        outputs = llm_pipeline(
+        outputs = llm_client.text_generation(
             test_text,
             max_new_tokens=10,
             num_return_sequences=1

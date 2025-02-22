@@ -11,12 +11,9 @@ authlib
 python-dotenv
 
 # ML/AI Libraries
-transformers
-torch
-accelerate
-safetensors
-sentence-transformers
+transformers  # Only needed for tokenizer
 huggingface-hub
+sentence-transformers
 
 # Vector Database
 faiss-cpu  # Use faiss-gpu if you have CUDA
