@@ -18,7 +18,6 @@ from requests.compat import urljoin
 from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
-import time
 
 # Kadi OAuth settings
 load_dotenv()
@@ -304,64 +303,44 @@ class SimpleRAG:
         
         for i in range(0, len(contents), batch_size):
             batch = contents[i:i + batch_size]
-            try:
-                # Use feature-extraction endpoint correctly
-                embedding_responses = embeddings_client.post(
-                    json={"inputs": batch},
-                    task="feature-extraction"
-                )
-                # The response is already a numpy array, no need for json.loads and decode
-                batch_embeddings = np.array(embedding_responses)
-                all_embeddings.append(batch_embeddings)
-                print(f"Processed batch {i//batch_size + 1}/{(len(contents) + batch_size - 1)//batch_size}")
-            except Exception as e:
-                print(f"Error processing batch {i//batch_size + 1}: {str(e)}")
-                continue
-        
-        if not all_embeddings:
-            print("No embeddings were generated successfully")
-            return
-        
-        try:
-            self.embeddings = np.vstack(all_embeddings)
+            embedding_responses = embeddings_client.post(
+                json={"inputs": batch},
+                task="feature-extraction"
+            )
+            batch_embeddings = np.array(json.loads(embedding_responses.decode()))
+            all_embeddings.append(batch_embeddings)
             
-            # Initialize FAISS index
-            dimension = self.embeddings.shape[1]
-            self.index = faiss.IndexFlatL2(dimension)
-            self.index.add(self.embeddings)
-            print(f"Vector database built successfully with {len(self.documents)} documents!")
-        except Exception as e:
-            print(f"Error building vector database: {str(e)}")
-            return
+        self.embeddings = np.vstack(all_embeddings)
+        
+        # Initialize FAISS index
+        dimension = self.embeddings.shape[1]
+        self.index = faiss.IndexFlatL2(dimension)
+        self.index.add(self.embeddings)
+        print(f"Vector database built successfully with {len(self.documents)} documents!")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
         if not self.index:
             return ["Vector database not initialized."]
             
-        try:
-            # Get query embedding using the same client
-            embedding_response = embeddings_client.post(
-                json={"inputs": query},
-                task="feature-extraction"
-            )
-            # The response is already a numpy array
-            query_embedding = np.array(embedding_response).reshape(1, -1)
-            
-            # Search similar documents
-            D, I = self.index.search(query_embedding, k)
-            
-            # Add metadata to results
-            results_with_metadata = []
-            for idx in I[0]:
-                doc = self.documents[idx]
-                metadata_str = f"\nSource: Record {doc['metadata'].get('record_id', 'unknown')}, File: {doc['metadata'].get('file_name', 'unknown')}"
-                results_with_metadata.append(doc["content"] + metadata_str)
-            
-            return results_with_metadata if results_with_metadata else ["No relevant documents found."]
-        except Exception as e:
-            print(f"Error during document search: {str(e)}")
-            return ["Error occurred while searching documents."]
+        # Get query embedding using the same client
+        embedding_responses = embeddings_client.post(
+            json={"inputs": [query]},
+            task="feature-extraction"
+        )
+        query_embedding = np.array(json.loads(embedding_responses.decode()))
+        
+        # Search similar documents
+        D, I = self.index.search(query_embedding, k)
+        
+        # Add metadata to results
+        results_with_metadata = []
+        for idx in I[0]:
+            doc = self.documents[idx]
+            metadata_str = f"\nSource: Record {doc['metadata'].get('record_id', 'unknown')}, File: {doc['metadata'].get('file_name', 'unknown')}"
+            results_with_metadata.append(doc["content"] + metadata_str)
+        
+        return results_with_metadata if results_with_metadata else ["No relevant documents found."]
 
 
 def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
@@ -393,38 +372,19 @@ def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"
 
 
 def load_and_chunk_pdf(file_path):
-    """Extracts text from a PDF file and chunks it into documents."""
-    try:
-        with pymupdf.open(file_path) as pdf:
-            text = ""
-            for page in pdf:
-                page_text = page.get_text()
-                if page_text.strip():  # Only add non-empty pages
-                    text += page_text + "\n\n"  # Add page breaks
+    """Extracts text from a PDF file and stores it in the property documents by chunks."""
 
-            if not text.strip():
-                print(f"Warning: No text content found in {file_path}")
-                return []
+    with pymupdf.open(file_path) as pdf:
+        text = ""
+        for page in pdf:
+            text += page.get_text()
 
-            chunks = chunk_text(text)
-            if not chunks:
-                print(f"Warning: No chunks generated for {file_path}")
-                return []
+        chunks = chunk_text(text)
+        documents = []
+        for chunk in chunks:
+            documents.append({"content": chunk, "metadata": pdf.metadata})
 
-            documents = []
-            for i, chunk in enumerate(chunks):
-                if chunk.strip():  # Only add non-empty chunks
-                    documents.append({
-                        "content": chunk,
-                        "chunk_id": i,
-                        "total_chunks": len(chunks)
-                    })
-
-            return documents
-
-    except Exception as e:
-        print(f"Error processing PDF {file_path}: {str(e)}")
-        return []
+        return documents
 
 
 def load_pdf(file_path):
@@ -447,218 +407,119 @@ def initialize_rag_system(token, progress=gr.Progress()):
     # Create connection to kadi
     manager = KadiManager(instance=instance, host=host, pat=token)
     
+    # Get all records
+    host_api = manager.host if manager.host.endswith("/") else manager.host + "/"
+    searched_resource = "records"
+    endpoint = urljoin(host_api, searched_resource)
+    
+    response = manager.search.search_resources("record", per_page=100)
+    parsed = json.loads(response.content)
+    total_pages = parsed["_pagination"]["total_pages"]
+    
+    progress(0.1, desc="Collecting records...")
+    
     # Initialize RAG
     rag_system = SimpleRAG()
     
-    try:
-        # Get all records
-        print("Fetching records from Kadi...")
-        response = manager.search.search_resources("record", per_page=100)
+    # Process each record
+    for page in range(1, total_pages + 1):
+        progress(0.1 + (0.4 * page/total_pages), desc=f"Processing records page {page}/{total_pages}")
+        
+        page_endpoint = endpoint + f"?page={page}&per_page=100"
+        response = manager.make_request(page_endpoint)
         parsed = json.loads(response.content)
         
-        # Debug print
-        print(f"Response status: {response.status_code}")
-        print(f"Response content keys: {list(parsed.keys())}")
-        
-        items = parsed.get("items", [])
-        print(f"Found {len(items)} records")
-        
-        if not items:
-            print("No records found in response")
-            return "No records found in Kadi", None
-        
-        progress(0.1, desc=f"Found {len(items)} records to process")
-        processed_records = 0
-        processed_files = 0
-        skipped_files = 0
-        
-        # Process each record
-        for item in items:
-            record_id = item.get("identifier")
-            if not record_id:
-                print("Skipping record with no identifier")
-                continue
-                
-            print(f"\nProcessing record: {record_id}")
+        for item in parsed["items"]:
+            record = manager.record(identifier=item["identifier"])
+            file_num = record.get_number_files()
             
-            try:
-                record = manager.record(identifier=record_id)
-                
-                # Get files for this record
-                file_list_response = record.get_filelist()
-                print(f"File list response status: {file_list_response.status_code}")
-                
-                file_list = file_list_response.json()
-                files = file_list.get("items", [])
-                print(f"Found {len(files)} files in record {record_id}")
+            # Get all files in the record
+            for p in range(1, (file_num // 100) + 2):
+                files = record.get_filelist(page=p, per_page=100).json()["items"]
                 
                 # Process each file
                 for file_info in files:
-                    file_name = file_info.get("name", "").lower()
-                    file_id = file_info.get("id")
+                    file_id = file_info["id"]
+                    file_name = file_info["name"]
                     
-                    if not all([file_name, file_id]):
-                        print(f"Skipping file with incomplete info: {file_name}")
-                        continue
-                    
-                    # Skip non-PDF files
-                    if not file_name.endswith('.pdf'):
-                        skipped_files += 1
-                        print(f"Skipping non-PDF file: {file_name}")
-                        continue
-                        
-                    print(f"Processing PDF file: {file_name}")
-                    
-                    try:
+                    if file_name.lower().endswith('.pdf'):
                         with tempfile.TemporaryDirectory(prefix="tmp-kadichat-") as temp_dir:
                             temp_file_location = os.path.join(temp_dir, file_name)
+                            record.download_file(file_id, temp_file_location)
                             
-                            # Download file
-                            print(f"Downloading file to {temp_file_location}")
-                            download_response = record.download_file(file_id, temp_file_location)
-                            
-                            if not os.path.exists(temp_file_location):
-                                print(f"Error: File not downloaded to {temp_file_location}")
-                                continue
-                                
-                            # Parse document
+                            # Parse document and add to RAG
                             docs = load_and_chunk_pdf(temp_file_location)
-                            if docs:
-                                for doc in docs:
-                                    doc["metadata"] = {
-                                        "record_id": record_id,
-                                        "file_name": file_name,
-                                        "record_title": item.get("title", "Unknown")
-                                    }
-                                rag_system.add_documents(docs)
-                                processed_files += 1
-                                print(f"Successfully processed {file_name} - got {len(docs)} chunks")
-                            else:
-                                print(f"No valid content extracted from {file_name}")
-                            
-                    except Exception as e:
-                        print(f"Error processing file {file_name}: {str(e)}")
-                        continue
-                        
-            except Exception as e:
-                print(f"Error processing record {record_id}: {str(e)}")
-                continue
-            
-            processed_records += 1
-            progress(0.1 + (0.7 * processed_records/len(items)), 
-                    desc=f"Processed {processed_records}/{len(items)} records. Files: {processed_files} processed, {skipped_files} skipped")
-        
-        # Build vector database if we have documents
-        if rag_system.documents:
-            print(f"\nBuilding vector database with {len(rag_system.documents)} documents...")
-            progress(0.8, desc="Building vector database...")
-            rag_system.build_vector_db()
-            progress(1.0, desc="RAG system ready")
-            return f"RAG system initialized with {len(rag_system.documents)} documents from {processed_records} records ({processed_files} files processed, {skipped_files} skipped)", rag_system
-        else:
-            print("No documents were processed successfully")
-            return "No documents were processed successfully", None
-            
-    except Exception as e:
-        print(f"Initialization error: {str(e)}")
-        return f"Failed to initialize RAG system: {str(e)}", None
+                            # Add record metadata to each chunk
+                            for doc in docs:
+                                doc["metadata"].update({
+                                    "record_id": item["identifier"],
+                                    "file_name": file_name
+                                })
+                            rag_system.add_documents(docs)
+    
+    progress(0.8, desc="Building vector database...")
+    rag_system.build_vector_db()
+    
+    progress(1.0, desc="RAG system ready")
+    return "RAG system initialized and ready", rag_system
 
 
 def preprocess_response(response: str) -> str:
     """Preprocesses the response to make it more polished."""
-    if not response or not response.strip():
-        return "I apologize, but I couldn't generate a proper response."
-        
-    # Basic cleaning
-    response = response.strip()
-    
-    # Remove multiple consecutive newlines
-    while "\n\n\n" in response:
-        response = response.replace("\n\n\n", "\n\n")
-        
-    # Ensure the response starts with a proper introduction if it doesn't have one
-    if not any(word in response.lower() for word in ["sorry", "apologize", "based on", "according to", "i found", "i can"]):
-        response = "Based on the available information, " + response
-        
+
+    # Placeholder for preprocessing
+
+    # response = response.strip()
+    # response = response.replace("\n\n", "\n")
+    # response = response.replace(" ,", ",")
+    # response = response.replace(" .", ".")
+    # response = " ".join(response.split())
+    # if not any(word in response.lower() for word in ["sorry", "apologize", "empathy"]):
+    #     response = "I'm here to help. " + response
     return response
 
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     """Get respond from LLMs."""
-    
-    try:
-        # Check if RAG system is properly initialized
-        if not user_session_rag or user_session_rag == "placeholder":
-            return history + [("Error: RAG system not initialized properly. Please refresh the page.", "")], ""
-            
-        # Debug print for RAG system state
-        print(f"RAG system documents count: {len(user_session_rag.documents)}")
-        
-        # Get relevant documents
-        print(f"Searching for documents relevant to: {message}")
-        retrieved_docs = user_session_rag.search_documents(message)
-        print(f"Retrieved {len(retrieved_docs)} relevant documents")
-        
-        if not retrieved_docs or retrieved_docs == ["No relevant documents found."]:
-            return history + [(message, "I don't have any relevant information in my knowledge base to answer your question. Could you please try a different question?")], ""
-        
-        # Build context from retrieved documents
-        context = "\n".join(retrieved_docs)
-        print(f"Context length: {len(context)} characters")
-        
-        # Construct prompt
-        system_message = f"""You are a helpful assistant with access to a knowledge base about Kadi records and documents.
-Please answer the user's question based on the following relevant documents. If you can't find relevant information,
-please say so honestly.
 
-Relevant documents:
-{context}"""
+    # message is the current input query from user
+    # RAG
+    retrieved_docs = user_session_rag.search_documents(message)
+    context = "\n".join(retrieved_docs)
+    system_message = "You are an assistant to help user to answer question related to Kadi based on Relevant documents.\nRelevant documents: {}".format(
+        context
+    )
+    messages = [{"role": "assistant", "content": system_message}]
 
-        messages = [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": message}
+    # Add history for conversational chat, TODO
+    # for val in history:
+    #     #if val[0]:
+    #     messages.append({"role": "user", "content": val[0]})
+    #     #if val[1]:
+    #     messages.append({"role": "assistant", "content": val[1]})
+
+    messages.append({"role": "user", "content": f"\nQuestion: {message}"})
+
+    # print("-----------------")
+    # print(messages)
+    # print("-----------------")
+    # Get anwser from LLM
+    response = client.chat_completion(
+        messages, max_tokens=2048, temperature=0.0
+    )  # , top_p=0.9)
+    response_content = "".join(
+        [
+            choice.message["content"]
+            for choice in response.choices
+            if "content" in choice.message
         ]
-        
-        # Get answer from LLM
-        print("Requesting response from LLM...")
-        response = client.chat_completion(
-            messages,
-            max_tokens=2048,
-            temperature=0.0,  # Slightly increased for more natural responses
-            top_p=0.9
-        )
-        
-        # Extract response content
-        response_content = ""
-        for choice in response.choices:
-            if "content" in choice.message:
-                response_content += choice.message["content"]
-                
-        if not response_content.strip():
-            print("Warning: Empty response from LLM")
-            return history + [(message, "I apologize, but I wasn't able to generate a proper response. Please try rephrasing your question.")], ""
-            
-        print(f"Generated response length: {len(response_content)} characters")
-        
-        # Process response
-        polished_response = preprocess_response(response_content)
-        
-        # Update history and return
-        history.append((message, polished_response))
-        return history, ""
-        
-    except Exception as e:
-        print(f"Error in respond function: {str(e)}")
-        return history + [(message, f"I apologize, but an error occurred while processing your request: {str(e)}")], ""
+    )
 
+    # Process response
+    polished_response = preprocess_response(response_content)
 
-def check_rag_system(rag):
-    """Check if RAG system is properly initialized"""
-    if isinstance(rag, SimpleRAG) and hasattr(rag, 'documents'):
-        print(f"RAG system initialized with {len(rag.documents)} documents")
-        return True
-    print("RAG system not properly initialized")
-    return False
+    history.append((message, polished_response))
+    return history, ""
 
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
@@ -697,18 +558,10 @@ with gr.Blocks() as main_demo:
             refresh_btn = gr.Button("Refresh Chat", scale=1, variant="secondary")
 
         # Initialize RAG system on load
-        main_demo.load(
-            _init_user_token, 
-            None, 
-            _state_user_token
-        ).then(
+        main_demo.load(_init_user_token, None, _state_user_token).then(
             initialize_rag_system,
             inputs=[_state_user_token],
             outputs=[status_box, user_session_rag]
-        ).then(
-            check_rag_system,
-            inputs=[user_session_rag],
-            outputs=None
         )
 
         # Actions
