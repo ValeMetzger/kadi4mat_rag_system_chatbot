@@ -60,6 +60,7 @@ oauth.register(
 from huggingface_hub import InferenceClient
 
 client = InferenceClient("meta-llama/Meta-Llama-3-8B-Instruct")
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 
 # Mixed-usage of huggingface client and local model for showing 2 possibilities
 embeddings_client = InferenceClient(
@@ -86,8 +87,6 @@ def rate_limit(max_per_minute):
     return decorator
 
 # Add tokenizer for token counting
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-
 def count_tokens(text):
     """Count tokens in text using the model's tokenizer."""
     return len(tokenizer.encode(text))
@@ -136,44 +135,48 @@ def validate_response(response_content: str) -> Tuple[bool, str]:
 
 @rate_limit(max_per_minute=30)
 def get_llm_response(messages: List[dict], max_retries: int = 3) -> str:
-    """Get LLM response with improved error handling and retry logic."""
+    """Enhanced LLM response handling with better error checking"""
     
     for attempt in range(max_retries):
         try:
-            # Add temperature jitter to help avoid repetition on retries
-            temperature = 0.2 + (attempt * 0.1)  # Gradually increase temperature
+            # Add request timeout
+            timeout = 30.0 * (attempt + 1)  # Increase timeout with retries
+            
+            # Add temperature jitter
+            temperature = 0.2 + (attempt * 0.1)
             
             response = client.chat_completion(
                 messages,
                 max_tokens=1024,
-                temperature=min(temperature, 0.7),  # Cap at 0.7
+                temperature=min(temperature, 0.7),
                 top_p=0.95,
                 presence_penalty=0.2,
                 frequency_penalty=0.2,
-                stop=["\n\n\n", "```", "<|", "|>"]  # Enhanced stop sequences
+                stop=["\n\n\n", "```", "<|", "|>"],
+                timeout=timeout
             )
             
-            # Extract and validate response
-            response_content = "".join([
-                choice.message["content"]
-                for choice in response.choices
-                if "content" in choice.message
-            ])
+            # Validate response structure
+            if not response.choices or not response.choices[0].message:
+                raise ValueError("Invalid response structure")
+                
+            response_content = response.choices[0].message["content"]
             
+            # Validate response content
             is_valid, reason = validate_response(response_content)
             if not is_valid:
                 print(f"Attempt {attempt + 1} failed validation: {reason}")
                 if attempt == max_retries - 1:
-                    raise ValueError(f"Failed to generate valid response after {max_retries} attempts")
+                    raise ValueError(f"Failed to generate valid response: {reason}")
                 continue
-            
+                
             return preprocess_response(response_content)
             
         except Exception as e:
-            print(f"Attempt {attempt + 1} failed with error: {str(e)}")
+            print(f"Attempt {attempt + 1} failed: {str(e)}")
             if attempt == max_retries - 1:
                 raise
-            time.sleep(1 * (attempt + 1))  # Exponential backoff
+            time.sleep(1 * (attempt + 1))
     
     raise RuntimeError("Failed to get valid response after all retries")
 
@@ -392,71 +395,87 @@ with gr.Blocks() as login_demo:
 # A simple RAG implementation
 class SimpleRAG:
     def __init__(self) -> None:
+        # Add explicit embedding dimension and normalization flag
+        self.embedding_dim = 768  # MPNet base dimension
+        self.normalize_vectors = True
+        self.index_type = "flat"  # Document index type used
         self.documents = []
-        self.embeddings_model = None
         self.embeddings = None
         self.index = None
         self.max_context_length = 4096
-        self.embedding_dim = 768  # Base embedding dimension for the model
         
     def add_documents(self, new_documents: List[dict]) -> None:
         """Add new documents to the existing collection"""
         self.documents.extend(new_documents)
         
     def validate_embedding(self, embedding: np.ndarray) -> np.ndarray:
-        """Validate and normalize embedding shape"""
-        # Handle 3D embeddings by taking mean across sequence length
+        """Validate and normalize embedding shape and values"""
         if embedding.ndim == 3:
             embedding = np.mean(embedding, axis=1)
-        return embedding.flatten()
+        embedding = embedding.flatten()
+        
+        # Add L2 normalization
+        if self.normalize_vectors:
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+                
+        # Validate dimension
+        if embedding.shape[0] != self.embedding_dim:
+            raise ValueError(f"Expected embedding dimension {self.embedding_dim}, got {embedding.shape[0]}")
+            
+        return embedding
         
     def build_vector_db(self) -> None:
-        """Builds a vector database using all documents"""
+        """Builds vector database with improved error handling and validation"""
         if not self.documents:
-            print("No documents to build vector database")
-            return
+            raise ValueError("No documents to build vector database")
             
-        contents = [doc["content"] for doc in self.documents]
-        
-        # Process in batches to avoid memory issues
+        # Process in smaller batches
         batch_size = 32
         all_embeddings = []
         
-        for i in range(0, len(contents), batch_size):
-            batch = contents[i:i + batch_size]
-            batch_embeddings = np.zeros((len(batch), self.embedding_dim), dtype=np.float32)
+        for i in range(0, len(self.documents), batch_size):
+            batch = self.documents[i:i + batch_size]
+            batch_embeddings = np.zeros((len(batch), self.embedding_dim))
             
-            for j, text in enumerate(batch):
+            for j, doc in enumerate(batch):
                 try:
+                    # Get embedding from HF client
                     embedding_response = embeddings_client.post(
-                        json={"inputs": text},
+                        json={"inputs": doc["content"]},
                         task="feature-extraction"
                     )
-                    embedding = np.array(json.loads(embedding_response.decode()), dtype=np.float32)
+                    embedding = np.array(json.loads(embedding_response.decode()))
                     embedding = self.validate_embedding(embedding)
-                    
-                    # Ensure correct dimension
-                    if embedding.shape[0] != self.embedding_dim:
-                        print(f"Warning: Inconsistent embedding dimension for document {i+j}")
-                        continue
-                        
                     batch_embeddings[j] = embedding
                     
                 except Exception as e:
-                    print(f"Error processing document {i+j}: {str(e)}")
+                    print(f"Error embedding document {i+j}: {str(e)}")
                     continue
-            
+                    
             all_embeddings.append(batch_embeddings)
-            print(f"Processed batch {i//batch_size + 1}/{(len(contents) + batch_size - 1)//batch_size}")
-        
+            
         try:
             self.embeddings = np.vstack(all_embeddings)
-            self.index = faiss.IndexFlatL2(self.embedding_dim)
+            
+            # Initialize appropriate FAISS index
+            if self.index_type == "flat":
+                self.index = faiss.IndexFlatL2(self.embedding_dim)
+            elif self.index_type == "ivf":
+                # For IVF, we need to train the index
+                nlist = min(4096, int(len(self.documents) / 39))
+                quantizer = faiss.IndexFlatL2(self.embedding_dim)
+                self.index = faiss.IndexIVFFlat(quantizer, self.embedding_dim, nlist)
+                # Train on a subset if dataset is large
+                train_size = min(100000, len(self.embeddings))
+                self.index.train(self.embeddings[:train_size])
+                
             self.index.add(self.embeddings)
-            print(f"Vector database built successfully with {len(self.documents)} documents!")
+            print(f"Built index with {len(self.documents)} documents")
             
         except Exception as e:
-            print(f"Error building index: {str(e)}")
+            print(f"Error building FAISS index: {str(e)}")
             raise
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
@@ -681,30 +700,38 @@ def preprocess_response(response: str) -> str:
 
 @rate_limit(max_per_minute=30)
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag) -> Tuple[List[Tuple[str, str]], str]:
-    """Enhanced chat response handler with better error recovery."""
+    """Enhanced response handler with context window management"""
     
     try:
-        # Validate input
-        if not message or not message.strip():
+        if not message.strip():
             return history, "Please provide a valid message."
-        
-        # Limit history context
-        max_history = 5
-        recent_history = history[-max_history:] if history else []
-        
-        # Get relevant documents with error handling
+            
+        # Get relevant documents
         try:
             retrieved_docs = user_session_rag.search_documents(message)
         except Exception as e:
             print(f"Document retrieval error: {str(e)}")
             retrieved_docs = []
+            
+        # Manage context window size
+        max_context_tokens = 4096  # LLaMA 3 8B context window
+        max_response_tokens = 1024
         
-        # Build context with reasonable limits
-        context = "\n".join(retrieved_docs[:3])  # Limit to top 3 docs
-        if len(context) > 2000:  # Reasonable context length
-            context = context[:2000] + "..."
+        # Reserve tokens for system message and response
+        available_tokens = max_context_tokens - max_response_tokens - 500  # Buffer for system message
         
-        # Construct messages
+        # Build context within token limit
+        context = ""
+        total_tokens = 0
+        
+        for doc in retrieved_docs[:3]:
+            doc_tokens = count_tokens(doc)
+            if total_tokens + doc_tokens > available_tokens:
+                break
+            context += doc + "\n\n"
+            total_tokens += doc_tokens
+            
+        # Construct messages with token tracking
         system_message = (
             "You are a helpful assistant. "
             f"Use this context to inform your response:\n{context}\n\n"
@@ -712,25 +739,40 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag) -> T
         )
         
         messages = [{"role": "system", "content": system_message}]
+        
+        # Add recent history within token limits
+        history_tokens = 0
+        recent_history = []
+        
+        for msg in reversed(history[-5:]):  # Last 5 messages
+            msg_tokens = count_tokens(msg[0]) + count_tokens(msg[1])
+            if history_tokens + msg_tokens > available_tokens // 2:  # Use half for history
+                break
+            recent_history.insert(0, msg)
+            history_tokens += msg_tokens
+            
         for user_msg, assistant_msg in recent_history:
-            messages.append({"role": "user", "content": user_msg})
-            messages.append({"role": "assistant", "content": assistant_msg})
+            messages.extend([
+                {"role": "user", "content": user_msg},
+                {"role": "assistant", "content": assistant_msg}
+            ])
+            
         messages.append({"role": "user", "content": message})
         
-        # Get response with enhanced error handling
+        # Get response with error handling
         try:
             response_content = get_llm_response(messages)
             history.append((message, response_content))
             return history, ""
             
         except ValueError as e:
-            return history, f"I'm having trouble generating a good response: {str(e)}"
+            return history, f"Response generation error: {str(e)}"
         except Exception as e:
-            return history, "I encountered an error. Please try again."
+            return history, "An error occurred. Please try again."
             
     except Exception as e:
-        print(f"Critical error in respond: {str(e)}")
-        return history, "An unexpected error occurred. Please try again."
+        print(f"Critical error: {str(e)}")
+        return history, "An unexpected error occurred."
 
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
@@ -789,6 +831,32 @@ with gr.Blocks() as main_demo:
         refresh_btn.click(lambda: [], None, chatbot)
 
 app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
+
+
+def validate_model_tokenizer():
+    """Validate model and tokenizer compatibility"""
+    try:
+        # Test tokenization and detokenization
+        test_text = "Hello, this is a test."
+        tokens = tokenizer.encode(test_text)
+        decoded = tokenizer.decode(tokens)
+        if not decoded.strip():
+            raise ValueError("Tokenizer validation failed")
+            
+        # Test model basic inference
+        response = client.chat_completion(
+            [{"role": "user", "content": test_text}],
+            max_tokens=10
+        )
+        if not response.choices[0].message["content"].strip():
+            raise ValueError("Model validation failed")
+            
+    except Exception as e:
+        print(f"Model/tokenizer validation error: {str(e)}")
+        raise
+
+# Call validation during startup
+validate_model_tokenizer()
 
 
 if __name__ == "__main__":
