@@ -302,15 +302,21 @@ class SimpleRAG:
         
         for i in range(0, len(contents), batch_size):
             batch = contents[i:i + batch_size]
-            # Get embeddings for the batch
-            embedding_responses = embeddings_client.post(
-                json={"inputs": batch},
-                task="feature-extraction"
-            )
-            # Convert bytes to string and parse JSON
-            response_data = json.loads(embedding_responses.decode())
-            # Convert to numpy array and ensure correct shape
-            batch_embeddings = np.array(response_data, dtype=np.float32)
+            # Process each text individually to ensure consistent shapes
+            batch_embeddings = []
+            for text in batch:
+                embedding_response = embeddings_client.post(
+                    json={"inputs": text},
+                    task="feature-extraction"
+                )
+                # Convert response to embedding vector
+                embedding = np.array(json.loads(embedding_response.decode()), dtype=np.float32)
+                # Ensure we get a 1D vector
+                embedding = embedding.squeeze()
+                batch_embeddings.append(embedding)
+            
+            # Stack batch embeddings
+            batch_embeddings = np.stack(batch_embeddings)
             all_embeddings.append(batch_embeddings)
             
         self.embeddings = np.vstack(all_embeddings)
@@ -327,14 +333,15 @@ class SimpleRAG:
             return ["Vector database not initialized."]
             
         # Get query embedding
-        embedding_responses = embeddings_client.post(
-            json={"inputs": [query]},
+        embedding_response = embeddings_client.post(
+            json={"inputs": query},
             task="feature-extraction"
         )
-        # Convert bytes to string and parse JSON
-        response_data = json.loads(embedding_responses.decode())
-        # Convert to numpy array and ensure correct shape
-        query_embedding = np.array(response_data, dtype=np.float32)
+        # Convert response to embedding vector
+        query_embedding = np.array(json.loads(embedding_response.decode()), dtype=np.float32)
+        # Ensure we get a 1D vector and reshape for FAISS
+        query_embedding = query_embedding.squeeze()
+        query_embedding = query_embedding.reshape(1, -1)
         
         # Search similar documents
         D, I = self.index.search(query_embedding, k)
