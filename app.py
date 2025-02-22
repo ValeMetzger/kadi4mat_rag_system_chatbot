@@ -59,17 +59,17 @@ oauth.register(
 # Global LLM client
 from huggingface_hub import InferenceClient
 
-# Initialize LLaMA 3.1 components
-MODEL_ID = "meta-llama/Llama-3.1-8B"
+# Initialize LLM components
+MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.2"  # Change to Mistral
 
 try:
-    # Use InferenceClient instead of loading model locally
+    # Use InferenceClient for API access
     llm_client = InferenceClient(
         MODEL_ID,
         token=huggingfacehub_api_token
     )
     
-    # Initialize tokenizer (much smaller memory footprint)
+    # Initialize tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         MODEL_ID,
         token=huggingfacehub_api_token,
@@ -77,7 +77,7 @@ try:
     )
     
 except Exception as e:
-    print(f"Error initializing LLaMA 3.1: {str(e)}")
+    print(f"Error initializing LLM: {str(e)}")
     raise
 
 # Mixed-usage of huggingface client and local model for showing 2 possibilities
@@ -153,25 +153,23 @@ def validate_response(response_content: str) -> Tuple[bool, str]:
 
 @rate_limit(max_per_minute=30)
 def get_llm_response(messages: List[dict], max_retries: int = 3) -> str:
-    """Enhanced LLM response handling using LLaMA 3.1 through Inference API"""
+    """Enhanced LLM response handling using Mistral"""
     
     for attempt in range(max_retries):
         try:
-            # Format messages into a prompt
-            formatted_prompt = ""
+            # Format messages into Mistral's expected format
+            formatted_prompt = "<s>"
             for msg in messages:
                 role = msg["role"]
                 content = msg["content"]
                 if role == "system":
-                    formatted_prompt += f"System: {content}\n\n"
+                    formatted_prompt += f"[INST] System: {content} [/INST]"
                 elif role == "user":
-                    formatted_prompt += f"User: {content}\n"
+                    formatted_prompt += f"[INST] {content} [/INST]"
                 elif role == "assistant":
-                    formatted_prompt += f"Assistant: {content}\n"
+                    formatted_prompt += f"{content}"
             
-            formatted_prompt += "Assistant: "
-            
-            # Use text-generation endpoint
+            # Generate response
             response = llm_client.text_generation(
                 formatted_prompt,
                 max_new_tokens=1024,
@@ -179,11 +177,11 @@ def get_llm_response(messages: List[dict], max_retries: int = 3) -> str:
                 top_p=0.95,
                 repetition_penalty=1.2,
                 do_sample=True,
-                stop_sequences=["\n\n\n", "```", "<|", "|>", "User:", "System:"]
+                stop_sequences=["</s>", "[INST]", "\n\n\n"]
             )
             
-            # Remove the input prompt from the response
-            response_content = response[len(formatted_prompt):].strip()
+            # Clean up response
+            response_content = response.strip()
             
             # Validate response
             is_valid, reason = validate_response(response_content)
@@ -1014,7 +1012,7 @@ app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_us
 
 
 def validate_model_tokenizer():
-    """Validate LLaMA 3.1 model and tokenizer compatibility"""
+    """Validate model and tokenizer compatibility"""
     try:
         # Test tokenization
         test_text = "Hello, this is a test."
@@ -1032,7 +1030,7 @@ def validate_model_tokenizer():
             raise ValueError("Model validation failed")
         
     except Exception as e:
-        print(f"LLaMA 3.1 validation error: {str(e)}")
+        print(f"validation error: {str(e)}")
         raise
 
 # Call validation during startup
