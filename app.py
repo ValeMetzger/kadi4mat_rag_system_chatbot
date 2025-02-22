@@ -95,18 +95,23 @@ def count_tokens(text):
 def validate_response(response_content: str) -> Tuple[bool, str]:
     """Validate response quality and return reason if invalid."""
     
-    # Check for empty or very short responses
-    if not response_content or len(response_content.strip()) < 10:
+    # Check for empty responses
+    if not response_content:
+        return False, "Empty response"
+        
+    # More lenient minimum length check
+    cleaned_content = response_content.strip()
+    if len(cleaned_content) < 5:  # Reduced from 10
         return False, "Response too short"
         
-    # Check for repetitive patterns
-    words = response_content.split()
-    if len(words) > 3:
-        repeated_words = sum(1 for i in range(len(words)-1) if words[i] == words[i+1])
-        if repeated_words > len(words) * 0.3:  # More than 30% repeated
+    # Check for repetitive patterns - made more lenient
+    words = cleaned_content.split()
+    if len(words) > 5:  # Increased threshold
+        repeated_words = sum(1 for i in range(len(words)-1) if words[i].lower() == words[i+1].lower())
+        if repeated_words > len(words) * 0.4:  # Increased threshold from 0.3
             return False, "Too many repeated words"
             
-    # Check for corruption markers - refined to be more specific
+    # Rest of validation checks remain the same...
     corruption_markers = [
         "the the",
         "protein the",
@@ -122,21 +127,21 @@ def validate_response(response_content: str) -> Tuple[bool, str]:
     ]
     
     # Check for numbered list at start of line
-    lines = response_content.split('\n')
+    lines = cleaned_content.split('\n')
     for line in lines:
         if line.strip().startswith('1.') and len(line.strip()) <= 3:
             return False, "Contains bare numbered list marker"
             
     for marker in corruption_markers:
-        if marker in response_content:
+        if marker in cleaned_content:
             return False, f"Contains corruption marker: {marker}"
             
-    # Check for coherent sentence structure
-    if not any(c.isupper() for c in response_content[:10]):
-        return False, "No capitalization in first 10 characters"
+    # More lenient structure checks
+    if not any(c.isupper() for c in cleaned_content[:20]):  # Increased from 10
+        return False, "No capitalization in first 20 characters"
         
-    # More lenient ending punctuation check
-    if not response_content.strip()[-1] in '.!?..."\'':
+    # Simplified ending punctuation check
+    if not cleaned_content[-1] in '.!?':
         return False, "Missing ending punctuation"
         
     return True, "Valid response"
@@ -147,7 +152,10 @@ def get_llm_response(messages):
     return client.chat_completion(
         messages,
         max_tokens=1024,
-        temperature=0.0
+        temperature=0.1,  # Slightly increased from 0.0
+        top_p=0.9,  # Added top_p sampling
+        presence_penalty=0.1,  # Added presence penalty
+        frequency_penalty=0.1  # Added frequency penalty
     )
 
 # Dependency to get the current user
