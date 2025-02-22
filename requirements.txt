@@ -16,7 +16,7 @@ huggingface-hub
 sentence-transformers
 
 # Vector Database
-faiss-cpu  # Use faiss-gpu if you have CUDA
+faiss-cpu
 
 # PDF Processing
 PyMuPDF

@@ -21,9 +21,7 @@ from dotenv import load_dotenv
 from transformers import AutoTokenizer
 import time
 from functools import wraps
-import transformers
-import torch
-from accelerate import init_empty_weights
+from huggingface_hub import InferenceClient, login
 
 # Kadi OAuth settings
 load_dotenv()
@@ -31,8 +29,6 @@ KADI_CLIENT_ID = os.environ["KADI_CLIENT_ID"]
 KADI_CLIENT_SECRET = os.environ["KADI_CLIENT_SECRET"]
 SECRET_KEY = os.environ["SECRET_KEY"]
 huggingfacehub_api_token = os.environ["huggingfacehub_api_token"]
-
-from huggingface_hub import login
 
 login(token=huggingfacehub_api_token)
 
@@ -174,19 +170,22 @@ def get_llm_response(messages: List[dict], max_retries: int = 3) -> str:
                 elif role == "assistant":
                     formatted_prompt += f"{content} </s>"
             
-            # Use text-generation endpoint
+            # Use text-generation endpoint with better parameters
             response = llm_client.text_generation(
                 formatted_prompt,
-                max_new_tokens=1024,
-                temperature=0.2 + (attempt * 0.1),
-                top_p=0.95,
+                max_new_tokens=512,  # Reduced to avoid long responses
+                temperature=0.7,  # Increased for more variety
+                top_p=0.9,
                 repetition_penalty=1.2,
                 do_sample=True,
-                stop_sequences=["</s>", "[INST]", "\n\n\n"]
+                stop_sequences=["</s>", "[INST]", "\n\n\n", "User:", "Assistant:"]
             )
             
-            # Clean up response
+            # Clean up response more aggressively
             response_content = response.strip()
+            response_content = response_content.split('[INST]')[0]  # Remove any instruction tags
+            response_content = response_content.split('</s>')[0]  # Remove end tags
+            response_content = response_content.strip()
             
             # Validate response
             is_valid, reason = validate_response(response_content)
@@ -421,15 +420,14 @@ with gr.Blocks() as login_demo:
 # A simple RAG implementation
 class SimpleRAG:
     def __init__(self) -> None:
-        # Add explicit embedding dimension and normalization flag
-        self.embedding_dim = 768  # MPNet base dimension
-        self.normalize_vectors = True
-        self.index_type = "flat"  # Document index type used
+        self.embedding_dim = 768
         self.documents = []
-        self.embeddings = None
         self.index = None
-        self.max_context_length = 4096
-        
+        self.embeddings_client = InferenceClient(
+            "sentence-transformers/all-mpnet-base-v2",
+            token=huggingfacehub_api_token
+        )
+    
     def add_documents(self, new_documents: List[dict]) -> None:
         """Add new documents with validation"""
         for doc in new_documents:
@@ -513,51 +511,46 @@ class SimpleRAG:
             raise
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
-        """Searches for relevant documents with quality checks"""
-        if not self.index:
-            print("Warning: Vector database not initialized")
-            return ["Vector database not initialized."]
-        
+        """Searches for relevant documents with improved logging"""
         try:
-            # Log document count
-            print(f"Total documents in index: {len(self.documents)}")
-            
-            # Get query embedding
-            embedding_response = embeddings_client.post(
-                json={"inputs": query},
-                task="feature-extraction"
-            )
-            query_embedding = np.array(json.loads(embedding_response.decode()), dtype=np.float32)
-            
-            query_embedding = self.validate_embedding(query_embedding)
-            query_embedding = query_embedding.reshape(1, -1)
-            
-            # Search and log distances
-            D, I = self.index.search(query_embedding, k)
-            print(f"Search distances: {D[0]}")  # Lower distances = better matches
-            
-            results_with_metadata = []
-            for i, idx in enumerate(I[0]):
-                distance = D[0][i]
-                similarity_score = 1 / (1 + distance)  # Convert distance to similarity
+            if not self.index:
+                print("Warning: Vector database not initialized")
+                return ["No documents available."]
                 
-                if similarity_score < 0.7:
-                    print(f"Document {i+1} below relevance threshold ({similarity_score:.2f})")
+            # Get query embedding
+            query_embedding = self.embeddings_client.feature_extraction(
+                query, 
+                pooling="mean", 
+                normalize=True
+            )
+            
+            # Search index
+            D, I = self.index.search(
+                np.array([query_embedding]).astype('float32'), 
+                k
+            )
+            
+            print(f"\nSearch distances: {D[0]}")
+            
+            # Filter by similarity threshold
+            results = []
+            for i, (dist, idx) in enumerate(zip(D[0], I[0])):
+                similarity = 1 / (1 + dist)  # Convert distance to similarity
+                if similarity < 0.5:  # Increased threshold
+                    print(f"Document {i+1} below similarity threshold ({similarity:.2f})")
                     continue
                     
                 if idx < len(self.documents):
                     doc = self.documents[idx]
-                    print(f"\nDocument {i+1} (similarity: {similarity_score:.2f}):")
-                    print(f"Record ID: {doc['metadata'].get('record_id', 'unknown')}")
-                    print(f"File: {doc['metadata'].get('file_name', 'unknown')}")
-                    metadata_str = f"\nSource: Record {doc['metadata'].get('record_id', 'unknown')}, File: {doc['metadata'].get('file_name', 'unknown')}"
-                    results_with_metadata.append(doc["content"] + metadata_str)
-            
-            return results_with_metadata if results_with_metadata else ["No sufficiently relevant documents found."]
+                    print(f"\nDocument {i+1} (similarity: {similarity:.2f})")
+                    print(f"Content length: {len(doc['content'])} chars")
+                    results.append(doc["content"])
+                    
+            return results if results else ["No sufficiently relevant documents found."]
             
         except Exception as e:
-            print(f"Error during search: {str(e)}")
-            return ["An error occurred during the search."]
+            print(f"Search error: {str(e)}")
+            return ["An error occurred during search."]
 
 
 def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
