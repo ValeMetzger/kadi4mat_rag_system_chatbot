@@ -649,8 +649,18 @@ def initialize_rag_system(token, progress=gr.Progress()):
     
     response = manager.search.search_resources("record", per_page=100)
     parsed = json.loads(response.content)
+    
+    # Get pagination info
     total_pages = parsed["_pagination"]["total_pages"]
-    total_records = parsed["_pagination"]["total"]
+    per_page = parsed["_pagination"]["per_page"]
+    current_page = parsed["_pagination"]["current_page"]
+    
+    # Calculate total records
+    total_records = (total_pages - 1) * per_page
+    if current_page == total_pages:
+        total_records += len(parsed["items"])
+    else:
+        total_records += per_page
     
     progress(0.1, desc=f"Found {total_records} records to process")
     
@@ -660,75 +670,97 @@ def initialize_rag_system(token, progress=gr.Progress()):
     
     # Process each record with detailed logging
     for page in range(1, total_pages + 1):
-        progress(0.1 + (0.4 * page/total_pages), 
-                desc=f"Processing records page {page}/{total_pages}")
-        
-        page_endpoint = endpoint + f"?page={page}&per_page=100"
-        response = manager.make_request(page_endpoint)
-        parsed = json.loads(response.content)
-        
-        for item in parsed["items"]:
-            try:
-                record = manager.record(identifier=item["identifier"])
-                file_num = record.get_number_files()
-                print(f"\nProcessing record {item['identifier']} with {file_num} files")
-                
-                # Calculate pages needed for files
-                pages_needed = (file_num + 99) // 100  # Ceiling division
-                
-                # Get all files in the record
-                for p in range(1, pages_needed + 1):
-                    files = record.get_filelist(page=p, per_page=100).json()["items"]
-                    print(f"Processing file page {p}/{pages_needed} ({len(files)} files)")
-                    
-                    # Process each file
-                    for file_info in files:
-                        file_id = file_info["id"]
-                        file_name = file_info["name"]
-                        
-                        if file_name.lower().endswith('.pdf'):
-                            print(f"Processing PDF: {file_name}")
-                            with tempfile.TemporaryDirectory(prefix="tmp-kadichat-") as temp_dir:
-                                temp_file_location = os.path.join(temp_dir, file_name)
-                                try:
-                                    record.download_file(file_id, temp_file_location)
-                                    
-                                    # Parse document with chunk size validation
-                                    docs = load_and_chunk_pdf(temp_file_location)
-                                    print(f"Generated {len(docs)} chunks from {file_name}")
-                                    
-                                    # Add record metadata to each chunk
-                                    for doc in docs:
-                                        doc["metadata"] = {
-                                            "record_id": item["identifier"],
-                                            "file_name": file_name,
-                                            "chunk_size": len(doc["content"])
-                                        }
-                                    
-                                    # Add chunks to RAG system
-                                    rag_system.add_documents(docs)
-                                    
-                                except Exception as e:
-                                    print(f"Error processing file {file_name}: {str(e)}")
-                                    continue
-                
-                processed_records += 1
-                print(f"Processed {processed_records}/{total_records} records")
-                
-            except Exception as e:
-                print(f"Error processing record {item['identifier']}: {str(e)}")
+        try:
+            progress(0.1 + (0.4 * page/total_pages), 
+                    desc=f"Processing records page {page}/{total_pages}")
+            
+            page_endpoint = endpoint + f"?page={page}&per_page=100"
+            response = manager.make_request(page_endpoint)
+            parsed = json.loads(response.content)
+            
+            if not parsed.get("items"):
+                print(f"Warning: No items found on page {page}")
                 continue
+            
+            for item in parsed["items"]:
+                try:
+                    record = manager.record(identifier=item["identifier"])
+                    file_num = record.get_number_files()
+                    print(f"\nProcessing record {item['identifier']} with {file_num} files")
+                    
+                    if file_num == 0:
+                        print(f"Skipping record {item['identifier']}: no files")
+                        continue
+                    
+                    # Calculate pages needed for files
+                    pages_needed = (file_num + 99) // 100  # Ceiling division
+                    
+                    # Get all files in the record
+                    for p in range(1, pages_needed + 1):
+                        try:
+                            files_response = record.get_filelist(page=p, per_page=100)
+                            files = files_response.json()["items"]
+                            print(f"Processing file page {p}/{pages_needed} ({len(files)} files)")
+                            
+                            # Process each file
+                            for file_info in files:
+                                file_id = file_info["id"]
+                                file_name = file_info["name"]
+                                
+                                if file_name.lower().endswith('.pdf'):
+                                    print(f"Processing PDF: {file_name}")
+                                    with tempfile.TemporaryDirectory(prefix="tmp-kadichat-") as temp_dir:
+                                        temp_file_location = os.path.join(temp_dir, file_name)
+                                        try:
+                                            record.download_file(file_id, temp_file_location)
+                                            
+                                            # Parse document with chunk size validation
+                                            docs = load_and_chunk_pdf(temp_file_location)
+                                            print(f"Generated {len(docs)} chunks from {file_name}")
+                                            
+                                            if not docs:
+                                                print(f"Warning: No chunks generated from {file_name}")
+                                                continue
+                                            
+                                            # Add record metadata to each chunk
+                                            for doc in docs:
+                                                doc["metadata"] = {
+                                                    "record_id": item["identifier"],
+                                                    "file_name": file_name,
+                                                    "chunk_size": len(doc["content"])
+                                                }
+                                            
+                                            # Add chunks to RAG system
+                                            rag_system.add_documents(docs)
+                                            
+                                        except Exception as e:
+                                            print(f"Error processing file {file_name}: {str(e)}")
+                                            continue
+                                            
+                        except Exception as e:
+                            print(f"Error processing file page {p}: {str(e)}")
+                            continue
+                    
+                    processed_records += 1
+                    print(f"Processed {processed_records}/{total_records} records")
+                    
+                except Exception as e:
+                    print(f"Error processing record {item['identifier']}: {str(e)}")
+                    continue
+                    
+        except Exception as e:
+            print(f"Error processing page {page}: {str(e)}")
+            continue
     
     progress(0.8, desc="Building vector database...")
     
     try:
+        if len(rag_system.documents) == 0:
+            raise ValueError("No documents were processed successfully")
+        
         rag_system.build_vector_db()
         print(f"Successfully built index with {len(rag_system.documents)} documents")
         
-        # Validate index
-        if len(rag_system.documents) == 0:
-            raise ValueError("No documents were processed successfully")
-            
         # Test search functionality
         test_results = rag_system.search_documents("test query")
         print(f"Index validation: retrieved {len(test_results)} results")
