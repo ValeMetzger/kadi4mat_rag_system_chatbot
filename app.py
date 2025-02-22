@@ -66,6 +66,25 @@ embeddings_client = InferenceClient(
     model="sentence-transformers/all-mpnet-base-v2", token=huggingfacehub_api_token
 )
 
+# Add rate limiting decorator
+def rate_limit(max_per_minute):
+    """Rate limit decorator to prevent API overload."""
+    interval = 60.0 / max_per_minute
+    last_time = [0.0]
+    
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            current_time = time.time()
+            elapsed = current_time - last_time[0]
+            if elapsed < interval:
+                time.sleep(interval - elapsed)
+            result = func(*args, **kwargs)
+            last_time[0] = time.time()
+            return result
+        return wrapper
+    return decorator
+
 # Add tokenizer for token counting
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 
@@ -569,26 +588,6 @@ def preprocess_response(response: str) -> str:
     # if not any(word in response.lower() for word in ["sorry", "apologize", "empathy"]):
     #     response = "I'm here to help. " + response
     return response
-
-
-# Add rate limiting decorator
-def rate_limit(max_per_minute):
-    """Rate limit decorator to prevent API overload."""
-    interval = 60.0 / max_per_minute
-    last_time = [0.0]
-    
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            current_time = time.time()
-            elapsed = current_time - last_time[0]
-            if elapsed < interval:
-                time.sleep(interval - elapsed)
-            result = func(*args, **kwargs)
-            last_time[0] = time.time()
-            return result
-        return wrapper
-    return decorator
 
 
 @rate_limit(max_per_minute=30)
