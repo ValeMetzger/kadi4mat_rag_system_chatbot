@@ -11,7 +11,7 @@ authlib
 python-dotenv
 
 # ML/AI Libraries
-transformers  # Only needed for tokenizer
+transformers
 huggingface-hub
 sentence-transformers
 

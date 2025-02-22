@@ -459,10 +459,10 @@ class SimpleRAG:
         return embedding
         
     def build_vector_db(self) -> None:
-        """Builds vector database with improved error handling and validation"""
+        """Builds vector database with improved error handling"""
         if not self.documents:
             raise ValueError("No documents to build vector database")
-            
+        
         # Process in smaller batches
         batch_size = 32
         all_embeddings = []
@@ -473,13 +473,12 @@ class SimpleRAG:
             
             for j, doc in enumerate(batch):
                 try:
-                    # Get embedding from HF client
-                    embedding_response = embeddings_client.post(
-                        json={"inputs": doc["content"]},
-                        task="feature-extraction"
+                    # Get embedding using feature_extraction
+                    embedding = self.embeddings_client.feature_extraction(
+                        doc["content"],
+                        pooling="mean",
+                        normalize=True
                     )
-                    embedding = np.array(json.loads(embedding_response.decode()))
-                    embedding = self.validate_embedding(embedding)
                     batch_embeddings[j] = embedding
                     
                 except Exception as e:
@@ -489,21 +488,13 @@ class SimpleRAG:
             all_embeddings.append(batch_embeddings)
             
         try:
-            self.embeddings = np.vstack(all_embeddings)
+            # Stack all embeddings
+            embeddings = np.vstack(all_embeddings)
             
-            # Initialize appropriate FAISS index
-            if self.index_type == "flat":
-                self.index = faiss.IndexFlatL2(self.embedding_dim)
-            elif self.index_type == "ivf":
-                # For IVF, we need to train the index
-                nlist = min(4096, int(len(self.documents) / 39))
-                quantizer = faiss.IndexFlatL2(self.embedding_dim)
-                self.index = faiss.IndexIVFFlat(quantizer, self.embedding_dim, nlist)
-                # Train on a subset if dataset is large
-                train_size = min(100000, len(self.embeddings))
-                self.index.train(self.embeddings[:train_size])
-                
-            self.index.add(self.embeddings)
+            # Initialize FAISS index
+            self.index = faiss.IndexFlatL2(self.embedding_dim)
+            self.index.add(embeddings.astype('float32'))
+            
             print(f"Built index with {len(self.documents)} documents")
             
         except Exception as e:
@@ -1019,13 +1010,18 @@ def validate_model_tokenizer():
         if not decoded.strip():
             raise ValueError("Tokenizer validation failed")
         
-        # Test generation
-        outputs = llm_client.text_generation(
+        # Test generation with correct parameters
+        response = llm_client.text_generation(
             test_text,
             max_new_tokens=10,
-            num_return_sequences=1
+            temperature=0.7,
+            top_p=0.9,
+            repetition_penalty=1.2,
+            do_sample=True,
+            stop_sequences=["</s>", "[INST]", "\n\n\n"]
         )
-        if not outputs[0]["generated_text"].strip():
+        
+        if not response.strip():
             raise ValueError("Model validation failed")
         
     except Exception as e:
