@@ -18,6 +18,9 @@ from requests.compat import urljoin
 from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
+from transformers import AutoTokenizer
+import time
+from functools import wraps
 
 # Kadi OAuth settings
 load_dotenv()
@@ -63,6 +66,41 @@ embeddings_client = InferenceClient(
     model="sentence-transformers/all-mpnet-base-v2", token=huggingfacehub_api_token
 )
 
+# Add tokenizer for token counting
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
+
+def count_tokens(text):
+    """Count tokens in text using the model's tokenizer."""
+    return len(tokenizer.encode(text))
+
+def validate_response(response_content: str) -> bool:
+    """Validate response quality."""
+    # Check minimum length
+    if len(response_content) < 10:
+        return False
+        
+    # Check for repetitive patterns
+    words = response_content.split()
+    if len(words) > 3:
+        repeated_words = sum(1 for i in range(len(words)-1) if words[i] == words[i+1])
+        if repeated_words > len(words) * 0.3:  # More than 30% repeated
+            return False
+            
+    # Check for common corruption markers
+    corruption_markers = ["the the", "1.", "protein the", "<", ">>"]
+    if any(marker in response_content.lower() for marker in corruption_markers):
+        return False
+            
+    return True
+
+@rate_limit(max_per_minute=30)
+def get_llm_response(messages):
+    """Get response from LLM with rate limiting."""
+    return client.chat_completion(
+        messages,
+        max_tokens=1024,
+        temperature=0.0
+    )
 
 # Dependency to get the current user
 def get_user(request: Request):
@@ -533,53 +571,93 @@ def preprocess_response(response: str) -> str:
     return response
 
 
+# Add rate limiting decorator
+def rate_limit(max_per_minute):
+    """Rate limit decorator to prevent API overload."""
+    interval = 60.0 / max_per_minute
+    last_time = [0.0]
+    
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            current_time = time.time()
+            elapsed = current_time - last_time[0]
+            if elapsed < interval:
+                time.sleep(interval - elapsed)
+            result = func(*args, **kwargs)
+            last_time[0] = time.time()
+            return result
+        return wrapper
+    return decorator
+
+
+@rate_limit(max_per_minute=30)
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
-    """Get respond from LLMs."""
+    """Get response from LLMs with improved context management and error handling."""
     try:
-        # RAG
+        # Limit history size
+        max_history_items = 3
+        recent_history = history[-max_history_items:] if history else []
+        
+        # Get relevant documents
         retrieved_docs = user_session_rag.search_documents(message)
-        context = "\n".join(retrieved_docs)
         
-        # Log context information
-        print(f"Context length: {len(context)} characters")
-        print(f"Number of retrieved docs: {len(retrieved_docs)}")
-        
-        # Truncate if needed
-        max_context_length = 4096
-        if len(context) > max_context_length:
-            context = context[:max_context_length]
-            print("Warning: Context truncated")
-            
-        system_message = "You are an assistant to help user to answer question related to Kadi based on Relevant documents.\nRelevant documents: {}".format(
-            context
+        # Manage context size
+        max_context_chars = 6000
+        context = ""
+        for doc in retrieved_docs:
+            if len(context) + len(doc) < max_context_chars:
+                context += doc + "\n"
+            else:
+                break
+                
+        # Structure prompt clearly
+        system_message = (
+            "You are an assistant helping users with questions about Kadi. "
+            "Base your response on these relevant documents:\n\n"
+            f"{context}\n\n"
+            "If you cannot find relevant information in the documents, "
+            "say so clearly instead of making things up."
         )
-        messages = [{"role": "assistant", "content": system_message}]
-        messages.append({"role": "user", "content": f"\nQuestion: {message}"})
         
-        # Get answer from LLM
-        try:
-            response = client.chat_completion(
-                messages,
-                max_tokens=1024,
-                temperature=0.0
-            )
-            response_content = "".join(
-                [
+        # Check total tokens
+        total_tokens = count_tokens(system_message + message)
+        if total_tokens > 4000:  # Adjust based on model limits
+            print(f"Warning: Input too long ({total_tokens} tokens)")
+            context = context[:int(len(context)/2)]
+            system_message = system_message.replace(context, context[:int(len(context)/2)])
+            
+        # Build messages with limited history
+        messages = [{"role": "system", "content": system_message}]
+        for user_msg, assistant_msg in recent_history:
+            messages.append({"role": "user", "content": user_msg})
+            messages.append({"role": "assistant", "content": assistant_msg})
+        messages.append({"role": "user", "content": message})
+        
+        # Get response with retries
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = get_llm_response(messages)
+                response_content = "".join([
                     choice.message["content"]
                     for choice in response.choices
                     if "content" in choice.message
-                ]
-            )
-        except Exception as e:
-            print(f"LLM error: {str(e)}")
-            return history, "Sorry, there was an error processing your request."
-            
-        # Process response
-        polished_response = preprocess_response(response_content)
-        
-        history.append((message, polished_response))
-        return history, ""
-        
+                ])
+                
+                # Validate response
+                if not validate_response(response_content):
+                    raise ValueError("Generated response failed validation")
+                    
+                history.append((message, response_content))
+                return history, ""
+                
+            except Exception as e:
+                print(f"Attempt {attempt + 1} failed: {str(e)}")
+                if attempt == max_retries - 1:
+                    return history, "I apologize, but I'm having trouble generating a proper response. Please try again."
+                time.sleep(1)  # Wait before retry
+                
     except Exception as e:
         print(f"Error in respond function: {str(e)}")
         return history, "An error occurred while processing your request."
