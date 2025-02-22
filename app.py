@@ -93,57 +93,89 @@ def count_tokens(text):
     return len(tokenizer.encode(text))
 
 def validate_response(response_content: str) -> Tuple[bool, str]:
-    """Validate response quality and return reason if invalid."""
+    """Enhanced validation of LLM responses with more robust corruption checks."""
     
-    # Check for empty responses
-    if not response_content:
-        return False, "Empty response"
+    if not response_content or not isinstance(response_content, str):
+        return False, "Invalid or empty response"
         
-    # More lenient minimum length check
-    cleaned_content = response_content.strip()
-    if len(cleaned_content) < 5:
+    # Check for common LLM artifacts that indicate corruption
+    corruption_indicators = {
+        'control_chars': ['\x00', '\x01', '\x02', '\x03', '\x04', '\x1a', '\x1b'],
+        'incomplete_tags': ['<|', '|>', '<<', '>>', '{*', '*}'],
+        'repeated_patterns': ['....', ',,,,', '????', '////'],
+        'markdown_artifacts': ['```', '===', '***', '___'],
+    }
+    
+    for category, indicators in corruption_indicators.items():
+        for indicator in indicators:
+            if indicator in response_content:
+                return False, f"Contains {category}: {indicator}"
+    
+    # Check for coherent structure
+    if len(response_content.strip()) < 10:
         return False, "Response too short"
         
-    # Check for repetitive patterns - made more lenient
-    words = cleaned_content.split()
-    if len(words) > 5:
-        repeated_words = sum(1 for i in range(len(words)-1) if words[i].lower() == words[i+1].lower())
-        if repeated_words > len(words) * 0.4:
-            return False, "Too many repeated words"
+    sentences = response_content.split('.')
+    if len(sentences) > 0:
+        first_sentence = sentences[0].strip()
+        if not any(c.isalpha() for c in first_sentence):
+            return False, "First sentence contains no letters"
             
-    # Check for corruption markers
-    corruption_markers = [
-        "<|",
-        "|>",
-        "<<",
-        ">>",
-        "\x00",  # null byte
-        "\u0000"  # unicode null
-    ]
-    
-    for marker in corruption_markers:
-        if marker in cleaned_content:
-            return False, f"Contains corruption marker: {marker}"
+    # Check for excessive repetition
+    words = response_content.split()
+    if len(words) >= 4:  # Only check if we have enough words
+        repeated_sequences = 0
+        for i in range(len(words) - 3):
+            sequence = ' '.join(words[i:i+3])
+            if response_content.count(sequence) > 2:
+                repeated_sequences += 1
+        if repeated_sequences > len(words) * 0.1:  # More than 10% repetition
+            return False, "Contains excessive repetition"
             
-    # More lenient structure checks
-    if not any(c.isupper() for c in cleaned_content[:20]):
-        return False, "No capitalization in first 20 characters"
-        
-    # Remove validation for ending punctuation since we'll handle it in preprocessing
     return True, "Valid response"
 
 @rate_limit(max_per_minute=30)
-def get_llm_response(messages):
-    """Get response from LLM with rate limiting."""
-    return client.chat_completion(
-        messages,
-        max_tokens=1024,
-        temperature=0.2,  # Slightly increased
-        top_p=0.95,  # Increased
-        presence_penalty=0.2,  # Increased
-        frequency_penalty=0.2,  # Increased
-        stop=["\n\n\n", "```"]  # Added stop sequences
-    )
+def get_llm_response(messages: List[dict], max_retries: int = 3) -> str:
+    """Get LLM response with improved error handling and retry logic."""
+    
+    for attempt in range(max_retries):
+        try:
+            # Add temperature jitter to help avoid repetition on retries
+            temperature = 0.2 + (attempt * 0.1)  # Gradually increase temperature
+            
+            response = client.chat_completion(
+                messages,
+                max_tokens=1024,
+                temperature=min(temperature, 0.7),  # Cap at 0.7
+                top_p=0.95,
+                presence_penalty=0.2,
+                frequency_penalty=0.2,
+                stop=["\n\n\n", "```", "<|", "|>"]  # Enhanced stop sequences
+            )
+            
+            # Extract and validate response
+            response_content = "".join([
+                choice.message["content"]
+                for choice in response.choices
+                if "content" in choice.message
+            ])
+            
+            is_valid, reason = validate_response(response_content)
+            if not is_valid:
+                print(f"Attempt {attempt + 1} failed validation: {reason}")
+                if attempt == max_retries - 1:
+                    raise ValueError(f"Failed to generate valid response after {max_retries} attempts")
+                continue
+            
+            return preprocess_response(response_content)
+            
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed with error: {str(e)}")
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(1 * (attempt + 1))  # Exponential backoff
+    
+    raise RuntimeError("Failed to get valid response after all retries")
 
 # Dependency to get the current user
 def get_user(request: Request):
@@ -600,116 +632,104 @@ def initialize_rag_system(token, progress=gr.Progress()):
 
 
 def preprocess_response(response: str) -> str:
-    """Preprocesses the response to make it more polished."""
+    """Enhanced preprocessing of LLM responses."""
     
+    if not response:
+        return ""
+        
     # Basic cleanup
     response = response.strip()
     
-    # Fix common formatting issues
-    response = response.replace(" ,", ",")
-    response = response.replace(" .", ".")
-    response = response.replace(" !", "!")
-    response = response.replace(" ?", "?")
-    response = response.replace(" :", ":")
-    response = response.replace(" ;", ";")
+    # Remove common LLM artifacts
+    artifacts_to_remove = [
+        '<|endoftext|>',
+        '<|im_start|>',
+        '<|im_end|>',
+        '```',
+        '===',
+    ]
+    for artifact in artifacts_to_remove:
+        response = response.replace(artifact, '')
+    
+    # Fix spacing around punctuation
+    punctuation_fixes = {
+        ' ,': ',',
+        ' .': '.',
+        ' !': '!',
+        ' ?': '?',
+        ' :': ':',
+        ' ;': ';',
+        '( ': '(',
+        ' )': ')',
+    }
+    for wrong, right in punctuation_fixes.items():
+        response = response.replace(wrong, right)
     
     # Remove multiple spaces and newlines
-    response = " ".join(response.split())
+    response = ' '.join(response.split())
     
     # Ensure proper sentence structure
-    if response and not response[0].isupper():
+    if response and response[0].islower():
         response = response[0].upper() + response[1:]
-        
-    # Ensure proper ending punctuation
+    
+    # Ensure proper ending
     if response and not response[-1] in '.!?':
-        # If ends with other punctuation, replace it
-        if response[-1] in ',;:':
-            response = response[:-1] + '.'
-        else:
-            response += '.'
-            
-    # Remove any remaining markdown or code formatting
-    response = response.replace('```', '')
-    response = response.replace('`', '')
+        response += '.'
     
     return response
 
 
 @rate_limit(max_per_minute=30)
-def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
-    """Get response from LLMs with improved error handling."""
+def respond(message: str, history: List[Tuple[str, str]], user_session_rag) -> Tuple[List[Tuple[str, str]], str]:
+    """Enhanced chat response handler with better error recovery."""
+    
     try:
-        # Limit history size
-        max_history_items = 3
-        recent_history = history[-max_history_items:] if history else []
+        # Validate input
+        if not message or not message.strip():
+            return history, "Please provide a valid message."
         
-        # Get relevant documents
-        retrieved_docs = user_session_rag.search_documents(message)
+        # Limit history context
+        max_history = 5
+        recent_history = history[-max_history:] if history else []
         
-        # Manage context size
-        max_context_chars = 6000
-        context = ""
-        for doc in retrieved_docs:
-            if len(context) + len(doc) < max_context_chars:
-                context += doc + "\n"
-            else:
-                break
-                
-        # Structure prompt clearly
+        # Get relevant documents with error handling
+        try:
+            retrieved_docs = user_session_rag.search_documents(message)
+        except Exception as e:
+            print(f"Document retrieval error: {str(e)}")
+            retrieved_docs = []
+        
+        # Build context with reasonable limits
+        context = "\n".join(retrieved_docs[:3])  # Limit to top 3 docs
+        if len(context) > 2000:  # Reasonable context length
+            context = context[:2000] + "..."
+        
+        # Construct messages
         system_message = (
-            "You are an assistant helping users with questions about Kadi. "
-            "Base your response on these relevant documents:\n\n"
-            f"{context}\n\n"
-            "If you cannot find relevant information in the documents, "
-            "say so clearly instead of making things up."
+            "You are a helpful assistant. "
+            f"Use this context to inform your response:\n{context}\n\n"
+            "If you're unsure or the context doesn't help, say so clearly."
         )
         
-        # Check total tokens
-        total_tokens = count_tokens(system_message + message)
-        if total_tokens > 4000:  # Adjust based on model limits
-            print(f"Warning: Input too long ({total_tokens} tokens)")
-            context = context[:int(len(context)/2)]
-            system_message = system_message.replace(context, context[:int(len(context)/2)])
-            
-        # Build messages with limited history
         messages = [{"role": "system", "content": system_message}]
         for user_msg, assistant_msg in recent_history:
             messages.append({"role": "user", "content": user_msg})
             messages.append({"role": "assistant", "content": assistant_msg})
         messages.append({"role": "user", "content": message})
         
-        # Get response with retries and better error handling
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = get_llm_response(messages)
-                response_content = "".join([
-                    choice.message["content"]
-                    for choice in response.choices
-                    if "content" in choice.message
-                ])
-                
-                # Enhanced validation
-                is_valid, reason = validate_response(response_content)
-                if not is_valid:
-                    print(f"Response validation failed: {reason}")
-                    if attempt == max_retries - 1:
-                        return history, f"I apologize, but I'm having trouble generating a proper response ({reason}). Please try again."
-                    continue
-                    
-                # Process valid response
-                response_content = preprocess_response(response_content)
-                history.append((message, response_content))
-                return history, ""
-                
-            except Exception as e:
-                print(f"Attempt {attempt + 1} failed: {str(e)}")
-                if attempt == max_retries - 1:
-                    return history, "I apologize, but I'm having technical difficulties. Please try again in a moment."
-                time.sleep(1)  # Wait before retry
-                
+        # Get response with enhanced error handling
+        try:
+            response_content = get_llm_response(messages)
+            history.append((message, response_content))
+            return history, ""
+            
+        except ValueError as e:
+            return history, f"I'm having trouble generating a good response: {str(e)}"
+        except Exception as e:
+            return history, "I encountered an error. Please try again."
+            
     except Exception as e:
-        print(f"Error in respond function: {str(e)}")
+        print(f"Critical error in respond: {str(e)}")
         return history, "An unexpected error occurred. Please try again."
 
 
