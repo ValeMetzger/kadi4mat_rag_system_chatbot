@@ -283,10 +283,16 @@ class SimpleRAG:
         self.embeddings_model = None
         self.embeddings = None
         self.index = None
+        self.max_context_length = 4096  # Maximum context length for LLM
         
     def add_documents(self, new_documents: List[dict]) -> None:
         """Add new documents to the existing collection"""
         self.documents.extend(new_documents)
+        
+    def _process_embedding(self, embedding: np.ndarray) -> np.ndarray:
+        """Process embedding to ensure consistent shape"""
+        # Convert to 1D array regardless of input shape
+        return embedding.reshape(-1)
         
     def build_vector_db(self) -> None:
         """Builds a vector database using all documents"""
@@ -305,22 +311,28 @@ class SimpleRAG:
             # Process each text individually to ensure consistent shapes
             batch_embeddings = []
             for text in batch:
-                embedding_response = embeddings_client.post(
-                    json={"inputs": text},
-                    task="feature-extraction"
-                )
-                # Convert response to embedding vector
-                embedding = np.array(json.loads(embedding_response.decode()), dtype=np.float32)
-                
-                # Normalize the shape regardless of input dimensions
-                while len(embedding.shape) > 1:
-                    embedding = embedding.squeeze(0)
-                
-                batch_embeddings.append(embedding)
+                try:
+                    embedding_response = embeddings_client.post(
+                        json={"inputs": text},
+                        task="feature-extraction"
+                    )
+                    # Convert response to embedding vector
+                    embedding = np.array(json.loads(embedding_response.decode()), dtype=np.float32)
+                    processed_embedding = self._process_embedding(embedding)
+                    batch_embeddings.append(processed_embedding)
+                except Exception as e:
+                    print(f"Error processing text: {str(e)}")
+                    continue
             
+            if not batch_embeddings:
+                continue
+                
             # Convert to numpy array
             batch_embeddings = np.array(batch_embeddings)
             all_embeddings.append(batch_embeddings)
+            
+        if not all_embeddings:
+            raise ValueError("No embeddings were successfully created")
             
         self.embeddings = np.vstack(all_embeddings)
         
@@ -328,66 +340,89 @@ class SimpleRAG:
         dimension = self.embeddings.shape[1]
         self.index = faiss.IndexFlatL2(dimension)
         self.index.add(self.embeddings)
+        
+        # Verify index
         print(f"Vector database built successfully with {len(self.documents)} documents!")
+        print(f"Index size: {self.index.ntotal}")
+        print(f"Embedding dimension: {self.index.d}")
+        
+        # Test search
+        test_query = self.embeddings[0].reshape(1, -1)
+        D, I = self.index.search(test_query, 1)
+        print(f"Test search distance: {D[0][0]}")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
         if not self.index:
             return ["Vector database not initialized."]
             
-        # Get query embedding
-        embedding_response = embeddings_client.post(
-            json={"inputs": query},
-            task="feature-extraction"
-        )
-        # Convert response to embedding vector
-        query_embedding = np.array(json.loads(embedding_response.decode()), dtype=np.float32)
-        
-        # Normalize the shape regardless of input dimensions
-        while len(query_embedding.shape) > 1:
-            query_embedding = query_embedding.squeeze(0)
+        try:
+            # Get query embedding
+            embedding_response = embeddings_client.post(
+                json={"inputs": query},
+                task="feature-extraction"
+            )
+            # Convert response to embedding vector
+            query_embedding = np.array(json.loads(embedding_response.decode()), dtype=np.float32)
+            processed_embedding = self._process_embedding(query_embedding)
             
-        # Reshape for FAISS
-        query_embedding = query_embedding.reshape(1, -1)
-        
-        # Search similar documents
-        D, I = self.index.search(query_embedding, k)
-        
-        # Add metadata to results
-        results_with_metadata = []
-        for idx in I[0]:
-            doc = self.documents[idx]
-            metadata_str = f"\nSource: Record {doc['metadata'].get('record_id', 'unknown')}, File: {doc['metadata'].get('file_name', 'unknown')}"
-            results_with_metadata.append(doc["content"] + metadata_str)
-        
-        return results_with_metadata if results_with_metadata else ["No relevant documents found."]
+            # Reshape for FAISS
+            query_embedding = processed_embedding.reshape(1, -1)
+            
+            # Search similar documents
+            D, I = self.index.search(query_embedding, k)
+            
+            # Add metadata to results
+            results_with_metadata = []
+            for idx in I[0]:
+                doc = self.documents[idx]
+                metadata_str = f"\nSource: Record {doc['metadata'].get('record_id', 'unknown')}, File: {doc['metadata'].get('file_name', 'unknown')}"
+                results_with_metadata.append(doc["content"] + metadata_str)
+            
+            return results_with_metadata if results_with_metadata else ["No relevant documents found."]
+            
+        except Exception as e:
+            print(f"Error in document search: {str(e)}")
+            return ["An error occurred while searching documents."]
 
 
 def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
     """Chunk text into pieces of specified size with overlap, considering separators."""
-
+    
     # Split the text by the separators
     for sep in separators:
         text = text.replace(sep, "\n")
-
+        
     chunks = []
     start = 0
-
+    
     while start < len(text):
         # Determine the end of the chunk, accounting for overlap and the chunk size
         end = min(len(text), start + chunk_size)
-
+        
         # Find a natural break point at the newline to avoid cutting words
         if end < len(text):
             while end > start and text[end] != "\n":
                 end -= 1
-
-        chunk = text[start:end].strip()  # Strip trailing whitespace
+                
+        chunk = text[start:end].strip()
+        
+        # Log chunk information
+        print(f"Chunk size: {len(chunk)} characters")
+        if len(chunk) > chunk_size:
+            print(f"Warning: Chunk exceeds size limit: {len(chunk)}")
+            
         chunks.append(chunk)
-
+        
         # Move the start position forward by the overlap size
         start += chunk_size - overlap_size
-
+        
+    # Log overall chunking statistics
+    if chunks:
+        avg_size = sum(len(c) for c in chunks) / len(chunks)
+        print(f"Number of chunks: {len(chunks)}")
+        print(f"Average chunk size: {avg_size:.2f} characters")
+        
     return chunks
 
 
@@ -501,45 +536,55 @@ def preprocess_response(response: str) -> str:
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     """Get respond from LLMs."""
-
-    # message is the current input query from user
-    # RAG
-    retrieved_docs = user_session_rag.search_documents(message)
-    context = "\n".join(retrieved_docs)
-    system_message = "You are an assistant to help user to answer question related to Kadi based on Relevant documents.\nRelevant documents: {}".format(
-        context
-    )
-    messages = [{"role": "assistant", "content": system_message}]
-
-    # Add history for conversational chat, TODO
-    # for val in history:
-    #     #if val[0]:
-    #     messages.append({"role": "user", "content": val[0]})
-    #     #if val[1]:
-    #     messages.append({"role": "assistant", "content": val[1]})
-
-    messages.append({"role": "user", "content": f"\nQuestion: {message}"})
-
-    # print("-----------------")
-    # print(messages)
-    # print("-----------------")
-    # Get anwser from LLM
-    response = client.chat_completion(
-        messages, max_tokens=2048, temperature=0.0
-    )  # , top_p=0.9)
-    response_content = "".join(
-        [
-            choice.message["content"]
-            for choice in response.choices
-            if "content" in choice.message
-        ]
-    )
-
-    # Process response
-    polished_response = preprocess_response(response_content)
-
-    history.append((message, polished_response))
-    return history, ""
+    try:
+        # RAG
+        retrieved_docs = user_session_rag.search_documents(message)
+        context = "\n".join(retrieved_docs)
+        
+        # Log context information
+        print(f"Context length: {len(context)} characters")
+        print(f"Number of retrieved docs: {len(retrieved_docs)}")
+        
+        # Truncate if needed
+        max_context_length = 4096
+        if len(context) > max_context_length:
+            context = context[:max_context_length]
+            print("Warning: Context truncated")
+            
+        system_message = "You are an assistant to help user to answer question related to Kadi based on Relevant documents.\nRelevant documents: {}".format(
+            context
+        )
+        messages = [{"role": "assistant", "content": system_message}]
+        messages.append({"role": "user", "content": f"\nQuestion: {message}"})
+        
+        # Get answer from LLM with reduced tokens and retry logic
+        try:
+            response = client.chat_completion(
+                messages,
+                max_tokens=1024,
+                temperature=0.0,
+                max_retries=3
+            )
+            response_content = "".join(
+                [
+                    choice.message["content"]
+                    for choice in response.choices
+                    if "content" in choice.message
+                ]
+            )
+        except Exception as e:
+            print(f"LLM error: {str(e)}")
+            return history, "Sorry, there was an error processing your request."
+            
+        # Process response
+        polished_response = preprocess_response(response_content)
+        
+        history.append((message, polished_response))
+        return history, ""
+        
+    except Exception as e:
+        print(f"Error in respond function: {str(e)}")
+        return history, "An error occurred while processing your request."
 
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
