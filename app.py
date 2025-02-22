@@ -402,8 +402,16 @@ class SimpleRAG:
         self.max_context_length = 4096
         
     def add_documents(self, new_documents: List[dict]) -> None:
-        """Add new documents to the existing collection"""
-        self.documents.extend(new_documents)
+        """Add new documents with validation"""
+        for doc in new_documents:
+            if not doc.get("content"):
+                print(f"Warning: Empty content in document with metadata: {doc.get('metadata', {})}")
+                continue
+            if len(doc["content"]) < 10:
+                print(f"Warning: Very short content ({len(doc['content'])} chars) in document: {doc.get('metadata', {})}")
+                continue
+            self.documents.append(doc)
+        print(f"Added {len(new_documents)} documents. Total documents: {len(self.documents)}")
         
     def validate_embedding(self, embedding: np.ndarray) -> np.ndarray:
         """Validate and normalize embedding shape and values"""
@@ -476,7 +484,7 @@ class SimpleRAG:
             raise
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
-        """Searches for relevant documents with improved logging."""
+        """Searches for relevant documents with quality checks"""
         if not self.index:
             print("Warning: Vector database not initialized")
             return ["Vector database not initialized."]
@@ -501,19 +509,22 @@ class SimpleRAG:
             
             results_with_metadata = []
             for i, idx in enumerate(I[0]):
+                distance = D[0][i]
+                similarity_score = 1 / (1 + distance)  # Convert distance to similarity
+                
+                if similarity_score < 0.7:
+                    print(f"Document {i+1} below relevance threshold ({similarity_score:.2f})")
+                    continue
+                    
                 if idx < len(self.documents):
                     doc = self.documents[idx]
-                    # Log each retrieved document
-                    print(f"\nDocument {i+1} (distance: {D[0][i]:.3f}):")
+                    print(f"\nDocument {i+1} (similarity: {similarity_score:.2f}):")
                     print(f"Record ID: {doc['metadata'].get('record_id', 'unknown')}")
                     print(f"File: {doc['metadata'].get('file_name', 'unknown')}")
-                    print(f"Content length: {len(doc['content'])} chars")
-                    print(f"First 100 chars: {doc['content'][:100]}...")
-                    
                     metadata_str = f"\nSource: Record {doc['metadata'].get('record_id', 'unknown')}, File: {doc['metadata'].get('file_name', 'unknown')}"
                     results_with_metadata.append(doc["content"] + metadata_str)
             
-            return results_with_metadata if results_with_metadata else ["No relevant documents found."]
+            return results_with_metadata if results_with_metadata else ["No sufficiently relevant documents found."]
             
         except Exception as e:
             print(f"Error during search: {str(e)}")
@@ -745,10 +756,12 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag) -> T
         # More focused system message
         system_message = (
             "You are a helpful assistant for answering questions about documents. "
-            "Base your response on the following context documents, separated by '---':\n\n"
+            "Base your response ONLY on the following context documents, separated by '---':\n\n"
             f"{context}\n\n"
-            "If the context doesn't contain relevant information, say so clearly. "
-            "Keep your response focused and avoid repetition or markdown formatting."
+            "If the context doesn't contain relevant information, respond with: "
+            "'I don't find specific information about that in the available documents.'\n"
+            "Keep your response clear, focused and avoid speculation. "
+            "Do not use markdown formatting or special characters."
         )
         
         messages = [{"role": "system", "content": system_message}]
