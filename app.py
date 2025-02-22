@@ -139,9 +139,6 @@ def get_llm_response(messages: List[dict], max_retries: int = 3) -> str:
     
     for attempt in range(max_retries):
         try:
-            # Add request timeout
-            timeout = 30.0 * (attempt + 1)  # Increase timeout with retries
-            
             # Add temperature jitter
             temperature = 0.2 + (attempt * 0.1)
             
@@ -152,8 +149,7 @@ def get_llm_response(messages: List[dict], max_retries: int = 3) -> str:
                 top_p=0.95,
                 presence_penalty=0.2,
                 frequency_penalty=0.2,
-                stop=["\n\n\n", "```", "<|", "|>"],
-                timeout=timeout
+                stop=["\n\n\n", "```", "<|", "|>"]
             )
             
             # Validate response structure
@@ -176,7 +172,8 @@ def get_llm_response(messages: List[dict], max_retries: int = 3) -> str:
             print(f"Attempt {attempt + 1} failed: {str(e)}")
             if attempt == max_retries - 1:
                 raise
-            time.sleep(1 * (attempt + 1))
+            # Exponential backoff between retries
+            time.sleep(2 ** attempt)
     
     raise RuntimeError("Failed to get valid response after all retries")
 
