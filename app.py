@@ -21,6 +21,8 @@ from dotenv import load_dotenv
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 import time
 from functools import wraps
+import transformers
+import torch
 
 # Kadi OAuth settings
 load_dotenv()
@@ -60,24 +62,27 @@ oauth.register(
 from huggingface_hub import InferenceClient
 
 # Initialize LLM components
-MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.2"  # Change to Mistral
+MODEL_ID = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 
 try:
-    # Use InferenceClient for API access
-    llm_client = InferenceClient(
-        MODEL_ID,
-        token=huggingfacehub_api_token
+    # Initialize pipeline with bfloat16 and auto device mapping
+    llm_pipeline = transformers.pipeline(
+        "text-generation",
+        model=MODEL_ID,
+        token=huggingfacehub_api_token,
+        model_kwargs={"torch_dtype": torch.bfloat16},
+        device_map="auto",
     )
     
     # Initialize tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
         MODEL_ID,
         token=huggingfacehub_api_token,
         trust_remote_code=True
     )
     
 except Exception as e:
-    print(f"Error initializing LLM: {str(e)}")
+    print(f"Error initializing LLaMA 3.1: {str(e)}")
     raise
 
 # Mixed-usage of huggingface client and local model for showing 2 possibilities
@@ -153,35 +158,46 @@ def validate_response(response_content: str) -> Tuple[bool, str]:
 
 @rate_limit(max_per_minute=30)
 def get_llm_response(messages: List[dict], max_retries: int = 3) -> str:
-    """Enhanced LLM response handling using Mistral"""
+    """Enhanced LLM response handling using LLaMA 3.1 pipeline"""
     
     for attempt in range(max_retries):
         try:
-            # Format messages into Mistral's expected format
-            formatted_prompt = "<s>"
+            # Format messages into LLaMA 3.1 chat format
+            formatted_prompt = ""
             for msg in messages:
                 role = msg["role"]
                 content = msg["content"]
                 if role == "system":
-                    formatted_prompt += f"[INST] System: {content} [/INST]"
+                    formatted_prompt += f"<s>[INST] <<SYS>>\n{content}\n<</SYS>>\n\n"
                 elif role == "user":
                     formatted_prompt += f"[INST] {content} [/INST]"
                 elif role == "assistant":
-                    formatted_prompt += f"{content}"
+                    formatted_prompt += f"{content} </s>"
             
             # Generate response
-            response = llm_client.text_generation(
+            outputs = llm_pipeline(
                 formatted_prompt,
                 max_new_tokens=1024,
                 temperature=0.2 + (attempt * 0.1),  # Temperature jitter
                 top_p=0.95,
                 repetition_penalty=1.2,
                 do_sample=True,
-                stop_sequences=["</s>", "[INST]", "\n\n\n"]
+                eos_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.pad_token_id
             )
             
-            # Clean up response
-            response_content = response.strip()
+            # Extract and clean response
+            response_text = outputs[0]["generated_text"]
+            
+            # Remove the input prompt from the response
+            response_content = response_text[len(formatted_prompt):].strip()
+            
+            # Remove any system or instruction tags
+            response_content = response_content.replace("[INST]", "")
+            response_content = response_content.replace("[/INST]", "")
+            response_content = response_content.replace("<<SYS>>", "")
+            response_content = response_content.replace("<</SYS>>", "")
+            response_content = response_content.replace("</s>", "")
             
             # Validate response
             is_valid, reason = validate_response(response_content)
@@ -1012,7 +1028,7 @@ app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_us
 
 
 def validate_model_tokenizer():
-    """Validate model and tokenizer compatibility"""
+    """Validate LLaMA 3.1 model and tokenizer"""
     try:
         # Test tokenization
         test_text = "Hello, this is a test."
@@ -1022,15 +1038,16 @@ def validate_model_tokenizer():
             raise ValueError("Tokenizer validation failed")
         
         # Test generation
-        response = llm_client.text_generation(
+        outputs = llm_pipeline(
             test_text,
-            max_new_tokens=10
+            max_new_tokens=10,
+            num_return_sequences=1
         )
-        if not response.strip():
+        if not outputs[0]["generated_text"].strip():
             raise ValueError("Model validation failed")
         
     except Exception as e:
-        print(f"validation error: {str(e)}")
+        print(f"LLaMA 3.1 validation error: {str(e)}")
         raise
 
 # Call validation during startup
