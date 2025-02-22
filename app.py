@@ -106,15 +106,38 @@ def validate_response(response_content: str) -> Tuple[bool, str]:
         if repeated_words > len(words) * 0.3:  # More than 30% repeated
             return False, "Too many repeated words"
             
-    # Check for common corruption markers
-    corruption_markers = ["the the", "1.", "protein the", "<", ">>", "```", "{{", "}}"]
+    # Check for corruption markers - refined to be more specific
+    corruption_markers = [
+        "the the",
+        "protein the",
+        "<|",
+        "|>",
+        "<<",
+        ">>",
+        "```",
+        "{{",
+        "}}",
+        "\x00",  # null byte
+        "\u0000"  # unicode null
+    ]
+    
+    # Check for numbered list at start of line
+    lines = response_content.split('\n')
+    for line in lines:
+        if line.strip().startswith('1.') and len(line.strip()) <= 3:
+            return False, "Contains bare numbered list marker"
+            
     for marker in corruption_markers:
         if marker in response_content:
             return False, f"Contains corruption marker: {marker}"
             
     # Check for coherent sentence structure
-    if not response_content[0].isupper() or not response_content[-1] in '.!?':
-        return False, "Malformed sentence structure"
+    if not any(c.isupper() for c in response_content[:10]):
+        return False, "No capitalization in first 10 characters"
+        
+    # More lenient ending punctuation check
+    if not response_content.strip()[-1] in '.!?..."\'':
+        return False, "Missing ending punctuation"
         
     return True, "Valid response"
 
