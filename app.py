@@ -63,15 +63,13 @@ from huggingface_hub import InferenceClient
 MODEL_ID = "meta-llama/Llama-3.1-8B"
 
 try:
-    # Initialize pipeline for text generation
-    llm_pipeline = pipeline(
-        "text-generation",
-        model=MODEL_ID,
-        token=huggingfacehub_api_token,
-        trust_remote_code=True
+    # Use InferenceClient instead of loading model locally
+    llm_client = InferenceClient(
+        MODEL_ID,
+        token=huggingfacehub_api_token
     )
     
-    # Initialize tokenizer
+    # Initialize tokenizer (much smaller memory footprint)
     tokenizer = AutoTokenizer.from_pretrained(
         MODEL_ID,
         token=huggingfacehub_api_token,
@@ -155,7 +153,7 @@ def validate_response(response_content: str) -> Tuple[bool, str]:
 
 @rate_limit(max_per_minute=30)
 def get_llm_response(messages: List[dict], max_retries: int = 3) -> str:
-    """Enhanced LLM response handling using LLaMA 3.1"""
+    """Enhanced LLM response handling using LLaMA 3.1 through Inference API"""
     
     for attempt in range(max_retries):
         try:
@@ -173,23 +171,19 @@ def get_llm_response(messages: List[dict], max_retries: int = 3) -> str:
             
             formatted_prompt += "Assistant: "
             
-            # Generate response
-            response = llm_pipeline(
+            # Use text-generation endpoint
+            response = llm_client.text_generation(
                 formatted_prompt,
                 max_new_tokens=1024,
                 temperature=0.2 + (attempt * 0.1),  # Temperature jitter
                 top_p=0.95,
                 repetition_penalty=1.2,
                 do_sample=True,
-                num_return_sequences=1,
                 stop_sequences=["\n\n\n", "```", "<|", "|>", "User:", "System:"]
             )
             
-            # Extract response text
-            response_text = response[0]["generated_text"]
-            
             # Remove the input prompt from the response
-            response_content = response_text[len(formatted_prompt):].strip()
+            response_content = response[len(formatted_prompt):].strip()
             
             # Validate response
             is_valid, reason = validate_response(response_content)
@@ -1030,12 +1024,11 @@ def validate_model_tokenizer():
             raise ValueError("Tokenizer validation failed")
         
         # Test generation
-        response = llm_pipeline(
+        response = llm_client.text_generation(
             test_text,
-            max_new_tokens=10,
-            num_return_sequences=1
+            max_new_tokens=10
         )
-        if not response[0]["generated_text"].strip():
+        if not response.strip():
             raise ValueError("Model validation failed")
         
     except Exception as e:
