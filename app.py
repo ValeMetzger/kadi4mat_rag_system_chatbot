@@ -361,15 +361,23 @@ class SimpleRAG:
         for distance, idx in zip(D[0], I[0]):
             if distance < threshold:  # Only include relevant results
                 doc = self.documents[idx]
+                # Add more context to the results
                 filtered_results.append({
                     "content": doc["content"],
                     "distance": distance,
-                    "metadata": doc.get("metadata", {})
+                    "metadata": doc.get("metadata", {}),
+                    "source": doc.get("file_name", "Unknown"),
+                    "page": doc.get("page", 0)
                 })
         
-        # Sort by distance and take top k
-        filtered_results.sort(key=lambda x: x["distance"])
-        results = [result["content"] for result in filtered_results[:k] if "content" in result]
+        # Format results for better readability
+        results = []
+        for result in filtered_results[:k]:
+            context = f"From {result['source']}"
+            if result['page']:
+                context += f" (page {result['page']})"
+            results.append(f"{context}:\n{result['content']}")
+        
         return results if results else ["No relevant documents found."]
 
 
