@@ -328,8 +328,8 @@ class SimpleRAG:
         self.index.add(np.array(self.embeddings))
         print(f"Total vectors in index: {self.index.ntotal}")
 
-    def search_documents(self, query: str, k: int = 4, threshold: float = 1000.0) -> List[str]:
-        """Searches for relevant documents using vector similarity with threshold."""
+    def search_documents(self, query: str, k: int = 4) -> List[str]:
+        """Searches for relevant documents using vector similarity."""
         
         print(f"\nDEBUG: Searching for query: {query}")
         
@@ -354,57 +354,50 @@ class SimpleRAG:
         assert query_embedding.shape[1] == self.index.d, \
             f"Query dimension {query_embedding.shape[1]} != Index dimension {self.index.d}"
         
-        # Search and filter results
-        D, I = self.index.search(query_embedding, k * 2)  # Get more candidates
+        # Search and get results
+        D, I = self.index.search(query_embedding, k)
         
-        filtered_results = []
-        for distance, idx in zip(D[0], I[0]):
-            if distance < threshold:  # Only include relevant results
-                doc = self.documents[idx]
-                # Add more context to the results
-                filtered_results.append({
-                    "content": doc["content"],
-                    "distance": distance,
-                    "metadata": doc.get("metadata", {}),
-                    "source": doc.get("file_name", "Unknown"),
-                    "page": doc.get("page", 0)
-                })
+        print("\nDEBUG: Search Results:")
+        for i, (distance, idx) in enumerate(zip(D[0], I[0])):
+            doc = self.documents[idx]
+            print(f"\nResult {i+1} (distance: {distance:.3f}):")
+            print(f"Metadata: {doc.get('metadata', {})}")
+            print(f"Content preview: {doc['content'][:200]}...")
         
-        # Format results for better readability
-        results = []
-        for result in filtered_results[:k]:
-            context = f"From {result['source']}"
-            if result['page']:
-                context += f" (page {result['page']})"
-            results.append(f"{context}:\n{result['content']}")
-        
+        results = [self.documents[i]["content"] for i in I[0]]
         return results if results else ["No relevant documents found."]
 
 
-def chunk_text(text, chunk_size=512, overlap_size=50):
-    """Smaller chunks for better retrieval."""
+def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
+    """Chunk text into pieces of specified size with overlap, considering separators."""
+    print(f"\nDEBUG: Chunking text of length {len(text)} characters")
+    print(f"DEBUG: Using chunk_size={chunk_size}, overlap_size={overlap_size}")
+
+    # Split the text by the separators
+    for sep in separators:
+        text = text.replace(sep, "\n")
+
     chunks = []
     start = 0
-    
+
     while start < len(text):
-        end = min(start + chunk_size, len(text))
-        
-        # Find a good break point
+        # Determine the end of the chunk, accounting for overlap and the chunk size
+        end = min(len(text), start + chunk_size)
+
+        # Find a natural break point at the newline to avoid cutting words
         if end < len(text):
-            # Try to break at sentence end
-            for sep in [". ", "! ", "? ", "\n\n", "\n"]:
-                last_sep = text[start:end].rfind(sep)
-                if last_sep != -1:
-                    end = start + last_sep + len(sep)
-                    break
+            while end > start and text[end] != "\n":
+                end -= 1
+
+        chunk = text[start:end].strip()  # Strip trailing whitespace
+        chunks.append(chunk)
         
-        chunk = text[start:end].strip()
-        if chunk:  # Only add non-empty chunks
-            chunks.append(chunk)
-        
-        # Move forward with overlap
-        start = max(start + 1, end - overlap_size)
-    
+        print(f"DEBUG: Created chunk {len(chunks)} with length {len(chunk)} characters")
+
+        # Move the start position forward by the overlap size
+        start += chunk_size - overlap_size
+
+    print(f"DEBUG: Final number of chunks: {len(chunks)}")
     return chunks
 
 
