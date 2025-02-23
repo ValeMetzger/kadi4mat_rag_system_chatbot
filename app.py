@@ -385,8 +385,16 @@ def prepare_all_files_for_chat(token, progress=gr.Progress()):
     response = manager.search.search_resources("record", per_page=100)
     parsed = json.loads(response.content)
     
+    # Debug print to see the structure
+    print("Response structure:", parsed.keys())
+    print("Full response:", parsed)
+    
     # Get all record identifiers from the search results
-    all_records_identifiers = [item["identifier"] for item in parsed["items"]]
+    if "items" in parsed:
+        all_records_identifiers = [item["identifier"] for item in parsed["items"]]
+    else:
+        # Try to get records directly if they're not in an "items" array
+        all_records_identifiers = [item["identifier"] for item in parsed]
     
     progress(0.2, desc="Processing files from records...")
     documents = []
