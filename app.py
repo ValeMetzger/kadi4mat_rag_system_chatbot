@@ -148,8 +148,10 @@ def greet(request: gr.Request):
 
 def get_files_in_record(all_records_identifiers, user_token):
     """Get all file lists from all records."""
+    print(f"Starting get_files_in_record with {len(all_records_identifiers)} records")  # Debug print
     
     if not all_records_identifiers:
+        print("No records provided")  # Debug print
         return []
         
     manager = KadiManager(instance=instance, host=host, pat=user_token)
@@ -179,41 +181,48 @@ def get_files_in_record(all_records_identifiers, user_token):
 
 def get_all_records(user_token, progress=gr.Progress()):
     """Get all record list in Kadi."""
+    print("Starting get_all_records with token:", user_token)  # Debug print
     progress(0, desc="Starting record collection...")
     if not user_token:
+        print("No token provided")  # Debug print
         return []
 
-    manager = KadiManager(instance=instance, host=host, pat=user_token)
+    try:
+        manager = KadiManager(instance=instance, host=host, pat=user_token)
 
-    host_api = manager.host if manager.host.endswith("/") else manager.host + "/"
-    searched_resource = "records"
-    endpoint = urljoin(
-        host_api, searched_resource
-    )  # e.g https://demo-kadi4mat.iam.kit.edu/api/" + "records"
+        host_api = manager.host if manager.host.endswith("/") else manager.host + "/"
+        searched_resource = "records"
+        endpoint = urljoin(
+            host_api, searched_resource
+        )  # e.g https://demo-kadi4mat.iam.kit.edu/api/" + "records"
 
-    response = manager.search.search_resources("record", per_page=100)
-    parsed = json.loads(response.content)
-
-    total_pages = parsed["_pagination"]["total_pages"]
-
-    def get_page_records(parsed_content):
-        item_identifiers = []
-        items = parsed_content["items"]
-        for item in items:
-            item_identifiers.append(item["identifier"])
-
-        return item_identifiers
-
-    progress(0.5, desc="Fetching records...")
-    all_records_identifiers = []
-    for page in range(1, total_pages + 1):
-        progress(0.5 + (0.5 * page/total_pages), desc=f"Processing page {page}/{total_pages}")
-        page_endpoint = endpoint + f"?page={page}&per_page=100"
-        response = manager.make_request(page_endpoint)
+        response = manager.search.search_resources("record", per_page=100)
         parsed = json.loads(response.content)
-        all_records_identifiers.extend(get_page_records(parsed))
 
-    return all_records_identifiers
+        total_pages = parsed["_pagination"]["total_pages"]
+
+        def get_page_records(parsed_content):
+            item_identifiers = []
+            items = parsed_content["items"]
+            for item in items:
+                item_identifiers.append(item["identifier"])
+
+            return item_identifiers
+
+        progress(0.5, desc="Fetching records...")
+        all_records_identifiers = []
+        for page in range(1, total_pages + 1):
+            progress(0.5 + (0.5 * page/total_pages), desc=f"Processing page {page}/{total_pages}")
+            page_endpoint = endpoint + f"?page={page}&per_page=100"
+            response = manager.make_request(page_endpoint)
+            parsed = json.loads(response.content)
+            all_records_identifiers.extend(get_page_records(parsed))
+
+        print(f"Found {len(all_records_identifiers)} records")  # Debug print
+        return all_records_identifiers
+    except Exception as e:
+        print(f"Error in get_all_records: {e}")  # Debug print
+        return []
 
 
 def _init_user_token(request: gr.Request):
@@ -546,20 +555,20 @@ with gr.Blocks() as main_demo:
 
                 # Chain of operations when button is clicked
                 load_files_btn.click(
-                    fn=lambda x: f"Token value: {x}", # Debug function
+                    fn=lambda x: f"Starting chain with token: {x}", # Debug function
                     inputs=[_state_user_token],
                     outputs=[debug_box],
-                ).then(
+                ).success(  # Changed from .then() to .success()
                     fn=get_all_records,
                     inputs=[_state_user_token],
                     outputs=[record_list],
                     show_progress=True,
-                ).then(
+                ).success(  # Changed from .then() to .success()
                     fn=get_files_in_record,
                     inputs=[record_list, _state_user_token],
                     outputs=[file_list],
                     show_progress=True,
-                ).then(
+                ).success(  # Changed from .then() to .success()
                     fn=prepare_file_for_chat,
                     inputs=[record_list, file_list, _state_user_token],
                     outputs=[progress_box, user_session_rag],
