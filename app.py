@@ -146,42 +146,36 @@ def greet(request: gr.Request):
     return f"Welcome to Kadichat, you're logged in as: {request.username}"
 
 
-def get_files_in_record(record_id, user_token, top_k=10):
-    """Get all file list within one record."""
-
+def get_files_in_record(all_records_identifiers, user_token):
+    """Get all file lists from all records."""
+    
+    if not all_records_identifiers:
+        return []
+        
     manager = KadiManager(instance=instance, host=host, pat=user_token)
+    all_file_names = []
 
-    try:
-        record = manager.record(identifier=record_id)
-    except kadi_apy.lib.exceptions.KadiAPYInputError as e:
-        raise gr.Error(e)
+    for record_id in all_records_identifiers:
+        try:
+            record = manager.record(identifier=record_id)
+            file_num = record.get_number_files()
 
-    file_num = record.get_number_files()
+            per_page = 100  # default in kadi
+            not_divisible = file_num % per_page
+            page_num = (file_num // per_page + 1) if not_divisible else (file_num // per_page)
 
-    per_page = 100  # default in kadi
-    not_divisible = file_num % per_page
-    if not_divisible:
-        page_num = file_num // per_page + 1
-    else:
-        page_num = file_num // per_page
-
-    file_names = []
-    for p in range(1, page_num + 1):  # page starts at 1 in kadi
-        file_names.extend(
-            [
-                info["name"]
-                for info in record.get_filelist(page=p, per_page=per_page).json()[
-                    "items"
+            for p in range(1, page_num + 1):  # page starts at 1 in kadi
+                file_names = [
+                    info["name"]
+                    for info in record.get_filelist(page=p, per_page=per_page).json()["items"]
                 ]
-            ]
-        )
+                all_file_names.extend(file_names)
 
-    assert file_num == len(
-        file_names
-    ), "Number of files did not match, please check function get_all_file_names."
+        except kadi_apy.lib.exceptions.KadiAPYInputError as e:
+            print(f"Error accessing record {record_id}: {e}")
+            continue
 
-    # return file_names[:top_k]
-    return file_names
+    return all_file_names
 
 def get_all_records(user_token):
     """Get all record list in Kadi."""
@@ -377,38 +371,71 @@ def load_pdf(file_path):
     return documents
 
 
-def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
+def prepare_file_for_chat(all_records_identifiers, all_file_names, token, progress=gr.Progress()):
     """Parse file and prepare RAG."""
 
-    if not file_names:
-        raise gr.Error("No file selected")
+    if not all_file_names:
+        raise gr.Error("No files found")
     progress(0, desc="Starting")
+    
     # Create connection to kadi
     manager = KadiManager(instance=instance, host=host, pat=token)
-    record = manager.record(identifier=record_id)
-    progress(0.2, desc="Loading files...")
-    # Parse files
     documents = []
-    # Download
-    for file_name in file_names:
-        file_id = record.get_file_id(file_name)
-        with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-            print(temp_dir)
-            temp_file_location = os.path.join(temp_dir, file_name)
-            record.download_file(file_id, temp_file_location)
-            # parse document
-            docs = load_and_chunk_pdf(temp_file_location)
-            documents.extend(docs)
+    
+    total_files = len(all_file_names)
+    files_processed = 0
+    
+    # Iterate through all records
+    for record_id in all_records_identifiers:
+        try:
+            record = manager.record(identifier=record_id)
+            
+            # Get all files for this record
+            record_files = record.get_filelist().json()["items"]
+            
+            # Process each file in this record
+            for file_info in record_files:
+                file_name = file_info["name"]
+                if file_name in all_file_names:  # Only process files we want
+                    progress(0.2 + (0.6 * files_processed/total_files), 
+                            desc=f"Processing {file_name}...")
+                    
+                    file_id = file_info["id"]
+                    with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+                        temp_file_location = os.path.join(temp_dir, file_name)
+                        record.download_file(file_id, temp_file_location)
+                        
+                        # Parse document
+                        try:
+                            docs = load_and_chunk_pdf(temp_file_location)
+                            # Add source information to each chunk
+                            for doc in docs:
+                                doc["metadata"].update({
+                                    "file_name": file_name,
+                                    "record_id": record_id
+                                })
+                            documents.extend(docs)
+                        except Exception as e:
+                            print(f"Error processing file {file_name}: {e}")
+                            continue
+                            
+                    files_processed += 1
+                    
+        except kadi_apy.lib.exceptions.KadiAPYInputError as e:
+            print(f"Error accessing record {record_id}: {e}")
+            continue
 
-    progress(0.4, desc="Embedding documents...")
+    if not documents:
+        raise gr.Error("No documents were successfully processed")
+
+    progress(0.8, desc="Building vector database...")
     user_rag = SimpleRAG()
     user_rag.documents = documents
     user_rag.embeddings_model = embeddings_model
     user_rag.build_vector_db()
-    # print(documents[:2])
-    print("user rag created")
-    progress(1, desc="ready to chat")
-    return "ready to chat", user_rag
+    
+    progress(1, desc="Ready to chat")
+    return "Ready to chat", user_rag
 
 
 def preprocess_response(response: str) -> str:
