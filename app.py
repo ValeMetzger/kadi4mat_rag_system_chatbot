@@ -61,7 +61,7 @@ from huggingface_hub import InferenceClient
 # Initialize LLM components using InferenceClient instead of pipeline
 from huggingface_hub import InferenceClient
 
-MODEL_ID = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
 
 try:
     # Use InferenceClient for API access
@@ -1001,7 +1001,7 @@ app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_us
 
 
 def validate_model_tokenizer():
-    """Validate LLaMA 3.1 model and tokenizer"""
+    """Validate LLaMA 3 model and tokenizer"""
     try:
         # Test tokenization
         test_text = "Hello, this is a test."
@@ -1025,7 +1025,7 @@ def validate_model_tokenizer():
             raise ValueError("Model validation failed")
         
     except Exception as e:
-        print(f"LLaMA 3.1 validation error: {str(e)}")
+        print(f"LLaMA 3 validation error: {str(e)}")
         raise
 
 # Call validation during startup
