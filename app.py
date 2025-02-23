@@ -331,6 +331,8 @@ class SimpleRAG:
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
         
+        print(f"\nDEBUG: Searching for query: {query}")
+        
         # Get query embedding
         embedding_responses = embeddings_client.post(
             json={"inputs": [query]}, task="feature-extraction"
@@ -338,28 +340,38 @@ class SimpleRAG:
         query_embedding = json.loads(embedding_responses.decode())
         
         # Debug print
-        print(f"Query embedding shape: {np.array(query_embedding).shape}")
+        print(f"DEBUG: Query embedding shape: {np.array(query_embedding).shape}")
         
         # Handle the (1,1,8,768) shape by taking the first embedding
         query_embedding = np.array(query_embedding)
         if len(query_embedding.shape) > 2:
-            # Take the first embedding (averaging might be another option)
             query_embedding = query_embedding[0, 0, 0].reshape(1, -1)
         
-        print(f"Processed query shape: {query_embedding.shape}")
-        print(f"Index dimension: {self.index.d}")
+        print(f"DEBUG: Processed query shape: {query_embedding.shape}")
+        print(f"DEBUG: Index dimension: {self.index.d}")
         
         # Verify dimensions
         assert query_embedding.shape[1] == self.index.d, \
             f"Query dimension {query_embedding.shape[1]} != Index dimension {self.index.d}"
         
+        # Search and get results
         D, I = self.index.search(query_embedding, k)
+        
+        print("\nDEBUG: Search Results:")
+        for i, (distance, idx) in enumerate(zip(D[0], I[0])):
+            doc = self.documents[idx]
+            print(f"\nResult {i+1} (distance: {distance:.3f}):")
+            print(f"Metadata: {doc.get('metadata', {})}")
+            print(f"Content preview: {doc['content'][:200]}...")
+        
         results = [self.documents[i]["content"] for i in I[0]]
         return results if results else ["No relevant documents found."]
 
 
 def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
     """Chunk text into pieces of specified size with overlap, considering separators."""
+    print(f"\nDEBUG: Chunking text of length {len(text)} characters")
+    print(f"DEBUG: Using chunk_size={chunk_size}, overlap_size={overlap_size}")
 
     # Split the text by the separators
     for sep in separators:
@@ -379,25 +391,38 @@ def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"
 
         chunk = text[start:end].strip()  # Strip trailing whitespace
         chunks.append(chunk)
+        
+        print(f"DEBUG: Created chunk {len(chunks)} with length {len(chunk)} characters")
 
         # Move the start position forward by the overlap size
         start += chunk_size - overlap_size
 
+    print(f"DEBUG: Final number of chunks: {len(chunks)}")
     return chunks
 
 
 def load_and_chunk_pdf(file_path):
     """Extracts text from a PDF file and stores it in the property documents by chunks."""
+    print(f"\nDEBUG: Processing PDF: {file_path}")
 
     with pymupdf.open(file_path) as pdf:
         text = ""
-        for page in pdf:
-            text += page.get_text()
+        for page_num, page in enumerate(pdf):
+            page_text = page.get_text()
+            text += page_text
+            print(f"DEBUG: Page {page_num + 1} length: {len(page_text)} characters")
 
         chunks = chunk_text(text)
+        print(f"DEBUG: Created {len(chunks)} chunks from PDF")
+        print(f"DEBUG: Average chunk size: {sum(len(c) for c in chunks)/len(chunks):.0f} characters")
+        print(f"DEBUG: First chunk preview: {chunks[0][:200]}...")
+        
         documents = []
-        for chunk in chunks:
-            documents.append({"content": chunk, "metadata": pdf.metadata})
+        for i, chunk in enumerate(chunks):
+            documents.append({
+                "content": chunk,
+                "metadata": {**pdf.metadata, "chunk_id": i}
+            })
 
         return documents
 
