@@ -376,13 +376,16 @@ def load_pdf(file_path):
 def prepare_all_files_for_chat(token, progress=gr.Progress()):
     """Parse all files from all records and prepare RAG."""
     
-    progress(0, desc="Starting")
-    # Create connection to kadi
-    manager = KadiManager(instance=instance, host=host, pat=token)
+    if not token:
+        raise gr.Error("No authentication token found. Please log in again.")
     
-    progress(0.1, desc="Getting all records...")
+    progress(0, desc="Starting")
     try:
-        # Get all records using the search functionality with proper authentication
+        # Create connection to kadi with the token as pat
+        manager = KadiManager(instance=instance, host=host, pat=token)  # Changed from token to pat
+        
+        progress(0.1, desc="Getting all records...")
+        # Get all records using the search functionality
         response = manager.search.search_resources("record", per_page=100)
         parsed = json.loads(response.content)
         
@@ -487,7 +490,7 @@ app = gr.mount_gradio_app(app, login_demo, path="/main")
 with gr.Blocks() as main_demo:
 
     # State for storing user token
-    _state_user_token = gr.State([])
+    _state_user_token = gr.State()
 
     # State for user rag
     user_session_rag = gr.State("placeholder")
@@ -506,6 +509,12 @@ with gr.Blocks() as main_demo:
             with gr.Column(scale=3):
                 load_files = gr.Button("Load All Documents")
                 message_box = gr.Textbox(label="", value="Click 'Load All Documents' to start", interactive=False)
+                
+                # Initialize the token state when the interface loads
+                def init_token(request: gr.Request):
+                    return request.request.session.get("user_access_token", None)
+                
+                main_demo.load(init_token, None, _state_user_token)
                 
                 # Load all files when button is clicked
                 load_files.click(
