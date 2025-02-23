@@ -553,22 +553,34 @@ with gr.Blocks() as main_demo:
                     [_state_user_token, debug_box],
                 )
 
+                def debug_step(step_name, data):
+                    print(f"Debug {step_name}:", data)
+                    return data, f"Completed {step_name} with data length: {len(data) if isinstance(data, list) else 'N/A'}"
+
                 # Chain of operations when button is clicked
                 load_files_btn.click(
-                    fn=lambda x: f"Starting chain with token: {x}", # Debug function
+                    fn=lambda x: (x, f"Starting chain with token: {x}"),
                     inputs=[_state_user_token],
-                    outputs=[debug_box],
-                ).success(  # Changed from .then() to .success()
+                    outputs=[_state_user_token, debug_box],
+                ).success(
                     fn=get_all_records,
                     inputs=[_state_user_token],
                     outputs=[record_list],
                     show_progress=True,
-                ).success(  # Changed from .then() to .success()
+                ).success(
+                    fn=lambda x: debug_step("get_all_records", x),
+                    inputs=[record_list],
+                    outputs=[record_list, debug_box],
+                ).success(
                     fn=get_files_in_record,
                     inputs=[record_list, _state_user_token],
                     outputs=[file_list],
                     show_progress=True,
-                ).success(  # Changed from .then() to .success()
+                ).success(
+                    fn=lambda x: debug_step("get_files_in_record", x),
+                    inputs=[file_list],
+                    outputs=[file_list, debug_box],
+                ).success(
                     fn=prepare_file_for_chat,
                     inputs=[record_list, file_list, _state_user_token],
                     outputs=[progress_box, user_session_rag],
