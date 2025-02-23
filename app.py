@@ -326,6 +326,7 @@ class SimpleRAG:
             json={"inputs": [query]}, task="feature-extraction"
         )
         query_embedding = json.loads(embedding_responses.decode())
+        query_embedding = np.array(query_embedding).reshape(1, -1)
         D, I = self.index.search(np.array(query_embedding), k)
         results = [self.documents[i]["content"] for i in I[0]]
         return results if results else ["No relevant documents found."]
