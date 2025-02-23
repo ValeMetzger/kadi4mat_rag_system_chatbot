@@ -381,54 +381,62 @@ def prepare_all_files_for_chat(token, progress=gr.Progress()):
     manager = KadiManager(instance=instance, host=host, pat=token)
     
     progress(0.1, desc="Getting all records...")
-    # Get all records using the search functionality
-    response = manager.search.search_resources("record", per_page=100)
-    parsed = json.loads(response.content)
-    
-    # Debug print to see the structure
-    print("Response structure:", parsed.keys())
-    print("Full response:", parsed)
-    
-    # Get all record identifiers from the search results
-    if "items" in parsed:
-        all_records_identifiers = [item["identifier"] for item in parsed["items"]]
-    else:
-        # Try to get records directly if they're not in an "items" array
-        all_records_identifiers = [item["identifier"] for item in parsed]
-    
-    progress(0.2, desc="Processing files from records...")
-    documents = []
-    total_records = len(all_records_identifiers)
-    
-    # Process each record
-    for idx, record_id in enumerate(all_records_identifiers):
-        progress(0.2 + (0.4 * idx/total_records), desc=f"Processing record {idx+1}/{total_records}")
-        try:
-            record = manager.record(identifier=record_id)
-            file_list = record.get_filelist().json()["items"]
+    try:
+        # Get all records using the search functionality with proper authentication
+        response = manager.search.search_resources("record", per_page=100)
+        parsed = json.loads(response.content)
+        
+        if 'code' in parsed and parsed['code'] == 401:
+            raise gr.Error("Authentication failed. Please log in again.")
             
-            # Process each file in the record
-            for file_info in file_list:
-                file_name = file_info["name"]
-                if file_name.lower().endswith('.pdf'):  # Only process PDFs
-                    file_id = record.get_file_id(file_name)
-                    with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-                        temp_file_location = os.path.join(temp_dir, file_name)
-                        record.download_file(file_id, temp_file_location)
-                        docs = load_and_chunk_pdf(temp_file_location)
-                        documents.extend(docs)
-        except Exception as e:
-            print(f"Error processing record {record_id}: {str(e)}")
-            continue
+        # Get all record identifiers from the search results
+        all_records_identifiers = []
+        if isinstance(parsed, list):
+            all_records_identifiers = [item["identifier"] for item in parsed]
+        elif "items" in parsed:
+            all_records_identifiers = [item["identifier"] for item in parsed["items"]]
+        else:
+            raise gr.Error("Unexpected API response format")
+        
+        if not all_records_identifiers:
+            raise gr.Error("No records found")
+            
+        progress(0.2, desc="Processing files from records...")
+        documents = []
+        total_records = len(all_records_identifiers)
+        
+        # Process each record
+        for idx, record_id in enumerate(all_records_identifiers):
+            progress(0.2 + (0.4 * idx/total_records), desc=f"Processing record {idx+1}/{total_records}")
+            try:
+                record = manager.record(identifier=record_id)
+                file_list = record.get_filelist().json()["items"]
+                
+                # Process each file in the record
+                for file_info in file_list:
+                    file_name = file_info["name"]
+                    if file_name.lower().endswith('.pdf'):  # Only process PDFs
+                        file_id = record.get_file_id(file_name)
+                        with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+                            temp_file_location = os.path.join(temp_dir, file_name)
+                            record.download_file(file_id, temp_file_location)
+                            docs = load_and_chunk_pdf(temp_file_location)
+                            documents.extend(docs)
+            except Exception as e:
+                print(f"Error processing record {record_id}: {str(e)}")
+                continue
 
-    progress(0.7, desc="Building vector database...")
-    user_rag = SimpleRAG()
-    user_rag.documents = documents
-    user_rag.embeddings_model = embeddings_model
-    user_rag.build_vector_db()
+        progress(0.7, desc="Building vector database...")
+        user_rag = SimpleRAG()
+        user_rag.documents = documents
+        user_rag.embeddings_model = embeddings_model
+        user_rag.build_vector_db()
 
-    progress(1, desc="Ready to chat")
-    return "Vector database ready with all available documents", user_rag
+        progress(1, desc="Ready to chat")
+        return "Vector database ready with all available documents", user_rag
+        
+    except Exception as e:
+        raise gr.Error(f"Error: {str(e)}")
 
 
 def preprocess_response(response: str) -> str:
