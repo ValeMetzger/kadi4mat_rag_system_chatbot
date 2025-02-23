@@ -18,10 +18,6 @@ from requests.compat import urljoin
 from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
-from transformers import AutoTokenizer
-import time
-from functools import wraps
-from huggingface_hub import InferenceClient, login
 
 # Kadi OAuth settings
 load_dotenv()
@@ -29,6 +25,8 @@ KADI_CLIENT_ID = os.environ["KADI_CLIENT_ID"]
 KADI_CLIENT_SECRET = os.environ["KADI_CLIENT_SECRET"]
 SECRET_KEY = os.environ["SECRET_KEY"]
 huggingfacehub_api_token = os.environ["huggingfacehub_api_token"]
+
+from huggingface_hub import login
 
 login(token=huggingfacehub_api_token)
 
@@ -58,152 +56,16 @@ oauth.register(
 # Global LLM client
 from huggingface_hub import InferenceClient
 
-# Initialize LLM components using InferenceClient instead of pipeline
-from huggingface_hub import InferenceClient
-
-MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
-
-try:
-    # Use InferenceClient for API access
-    llm_client = InferenceClient(
-        MODEL_ID,
-        token=huggingfacehub_api_token
-    )
-    
-    # Initialize tokenizer (needed only for token counting)
-    tokenizer = AutoTokenizer.from_pretrained(
-        MODEL_ID,
-        token=huggingfacehub_api_token,
-        trust_remote_code=True
-    )
-    
-except Exception as e:
-    print(f"Error initializing LLM client: {str(e)}")
-    raise
+client = InferenceClient("meta-llama/Meta-Llama-3-8B-Instruct")
 
 # Mixed-usage of huggingface client and local model for showing 2 possibilities
 embeddings_client = InferenceClient(
     model="sentence-transformers/all-mpnet-base-v2", token=huggingfacehub_api_token
 )
+embeddings_model = SentenceTransformer(
+    "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
+)
 
-# Add rate limiting decorator
-def rate_limit(max_per_minute):
-    """Rate limit decorator to prevent API overload."""
-    interval = 60.0 / max_per_minute
-    last_time = [0.0]
-    
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            current_time = time.time()
-            elapsed = current_time - last_time[0]
-            if elapsed < interval:
-                time.sleep(interval - elapsed)
-            result = func(*args, **kwargs)
-            last_time[0] = time.time()
-            return result
-        return wrapper
-    return decorator
-
-# Add tokenizer for token counting
-def count_tokens(text):
-    """Count tokens in text using the model's tokenizer."""
-    return len(tokenizer.encode(text))
-
-def validate_response(response_content: str) -> Tuple[bool, str]:
-    """Enhanced validation of LLM responses with more robust corruption checks."""
-    
-    if not response_content or not isinstance(response_content, str):
-        return False, "Invalid or empty response"
-        
-    # Check for common LLM artifacts that indicate corruption
-    corruption_indicators = {
-        'control_chars': ['\x00', '\x01', '\x02', '\x03', '\x04', '\x1a', '\x1b'],
-        'incomplete_tags': ['<|', '|>', '<<', '>>', '{*', '*}'],
-        'repeated_patterns': ['....', ',,,,', '????', '////'],
-        'markdown_artifacts': ['```', '===', '***', '___'],
-    }
-    
-    for category, indicators in corruption_indicators.items():
-        for indicator in indicators:
-            if indicator in response_content:
-                return False, f"Contains {category}: {indicator}"
-    
-    # Check for coherent structure
-    if len(response_content.strip()) < 10:
-        return False, "Response too short"
-        
-    sentences = response_content.split('.')
-    if len(sentences) > 0:
-        first_sentence = sentences[0].strip()
-        if not any(c.isalpha() for c in first_sentence):
-            return False, "First sentence contains no letters"
-            
-    # Check for excessive repetition
-    words = response_content.split()
-    if len(words) >= 4:  # Only check if we have enough words
-        repeated_sequences = 0
-        for i in range(len(words) - 3):
-            sequence = ' '.join(words[i:i+3])
-            if response_content.count(sequence) > 2:
-                repeated_sequences += 1
-        if repeated_sequences > len(words) * 0.1:  # More than 10% repetition
-            return False, "Contains excessive repetition"
-            
-    return True, "Valid response"
-
-@rate_limit(max_per_minute=30)
-def get_llm_response(messages: List[dict], max_retries: int = 3) -> str:
-    """Enhanced LLM response handling using Inference API"""
-    
-    for attempt in range(max_retries):
-        try:
-            # Format messages into chat format
-            formatted_prompt = ""
-            for msg in messages:
-                role = msg["role"]
-                content = msg["content"]
-                if role == "system":
-                    formatted_prompt += f"<s>[INST] <<SYS>>\n{content}\n<</SYS>>\n\n"
-                elif role == "user":
-                    formatted_prompt += f"[INST] {content} [/INST]"
-                elif role == "assistant":
-                    formatted_prompt += f"{content} </s>"
-            
-            # Use text-generation endpoint with reduced stop sequences
-            response = llm_client.text_generation(
-                formatted_prompt,
-                max_new_tokens=512,
-                temperature=0.7,
-                top_p=0.9,
-                repetition_penalty=1.2,
-                do_sample=True,
-                stop_sequences=["</s>", "[INST]"]  # Reduced stop sequences
-            )
-            
-            # Clean up response
-            response_content = response.strip()
-            response_content = response_content.split('[INST]')[0]
-            response_content = response_content.split('</s>')[0]
-            response_content = response_content.strip()
-            
-            # Validate response
-            is_valid, reason = validate_response(response_content)
-            if not is_valid:
-                print(f"Attempt {attempt + 1} failed validation: {reason}")
-                if attempt == max_retries - 1:
-                    raise ValueError(f"Failed to generate valid response: {reason}")
-                continue
-            
-            return preprocess_response(response_content)
-            
-        except Exception as e:
-            print(f"Attempt {attempt + 1} failed: {str(e)}")
-            if attempt == max_retries - 1:
-                raise
-            time.sleep(2 ** attempt)
-    
-    raise RuntimeError("Failed to get valid response after all retries")
 
 # Dependency to get the current user
 def get_user(request: Request):
@@ -253,10 +115,7 @@ async def login(request: Request):
     root_url = gr.route_utils.get_root_url(request, "/login", None)
     redirect_uri = request.url_for("auth")  # f"{root_url}/auth"
     redirect_uri = redirect_uri.replace(scheme="https")  # required by Kadi
-    # print("-----------in login")
-    # print("root_urlt", root_url)
-    # print("redirect_uri", redirect_uri)
-    # print("request", request)
+
     return await oauth.kadi4mat.authorize_redirect(request, redirect_uri)
 
 
@@ -264,9 +123,6 @@ async def login(request: Request):
 @app.route("/auth")
 async def auth(request: Request):
     root_url = gr.route_utils.get_root_url(request, "/auth", None)
-    # print("*****+ in auth")
-    # print("root_urlt", root_url)
-    # print("request", request)
     try:
         access_token = await oauth.kadi4mat.authorize_access_token(request)
         request.session["user_access_token"] = access_token["access_token"]
@@ -420,214 +276,93 @@ with gr.Blocks() as login_demo:
 # A simple RAG implementation
 class SimpleRAG:
     def __init__(self) -> None:
-        self.embedding_dim = 768
         self.documents = []
+        self.embeddings_model = None
+        self.embeddings = None
         self.index = None
-        self.normalize_vectors = True
-        self.embeddings_client = InferenceClient(
-            "sentence-transformers/all-mpnet-base-v2",
-            token=huggingfacehub_api_token
-        )
-    
-    def add_documents(self, new_documents: List[dict]) -> None:
-        """Add new documents with validation"""
-        for doc in new_documents:
-            if not doc.get("content"):
-                print(f"Warning: Empty content in document with metadata: {doc.get('metadata', {})}")
-                continue
-            if len(doc["content"]) < 10:
-                print(f"Warning: Very short content ({len(doc['content'])} chars) in document: {doc.get('metadata', {})}")
-                continue
-            self.documents.append(doc)
-        print(f"Added {len(new_documents)} documents. Total documents: {len(self.documents)}")
-        
-    def validate_embedding(self, embedding: np.ndarray) -> np.ndarray:
-        """Validate and normalize embedding shape and values"""
-        if embedding.ndim == 3:
-            embedding = np.mean(embedding, axis=1)
-        embedding = embedding.flatten()
-        
-        # Add L2 normalization
-        if self.normalize_vectors:
-            norm = np.linalg.norm(embedding)
-            if norm > 0:
-                embedding = embedding / norm
-                
-        # Validate dimension
-        if embedding.shape[0] != self.embedding_dim:
-            raise ValueError(f"Expected embedding dimension {self.embedding_dim}, got {embedding.shape[0]}")
-            
-        return embedding
-        
+
+
+    def load_pdf(self, file_path: str) -> None:
+        """Extracts text from a PDF file and stores it in the property documents by page."""
+
+        doc = pymupdf.open(file_path)
+        self.documents = []
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text = page.get_text()
+            self.documents.append({"page": page_num + 1, "content": text})
+        # print("PDF processed successfully!")
+
     def build_vector_db(self) -> None:
-        """Builds vector database with improved error handling"""
-        if not self.documents:
-            raise ValueError("No documents to build vector database")
-        
-        # Process in smaller batches
-        batch_size = 32
-        all_embeddings = []
-        
-        for i in range(0, len(self.documents), batch_size):
-            batch = self.documents[i:i + batch_size]
-            batch_embeddings = np.zeros((len(batch), self.embedding_dim))
-            
-            for j, doc in enumerate(batch):
-                try:
-                    # Remove pooling parameter and use direct feature extraction
-                    embedding = self.embeddings_client.feature_extraction(
-                        doc["content"]
-                    )
-                    batch_embeddings[j] = embedding
-                    
-                except Exception as e:
-                    print(f"Error embedding document {i+j}: {str(e)}")
-                    continue
-                    
-            all_embeddings.append(batch_embeddings)
-            
-        try:
-            # Stack all embeddings
-            embeddings = np.vstack(all_embeddings)
-            
-            # Initialize FAISS index
-            self.index = faiss.IndexFlatL2(self.embedding_dim)
-            self.index.add(embeddings.astype('float32'))
-            
-            print(f"Built index with {len(self.documents)} documents")
-            
-        except Exception as e:
-            print(f"Error building FAISS index: {str(e)}")
-            raise
+        """Builds a vector database using the content of the PDF."""
+        if self.embeddings_model is None:
+            self.embeddings_model = SentenceTransformer(
+                "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
+            )  
+
+
+        self.embeddings = self.embeddings_model.encode(
+            [doc["content"] for doc in self.documents], show_progress_bar=True
+        )
+        self.index = faiss.IndexFlatL2(self.embeddings.shape[1])
+        self.index.add(np.array(self.embeddings))
+        print("Vector database built successfully!")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
-        """Searches for relevant documents with improved logging"""
-        try:
-            if not self.index:
-                print("Warning: Vector database not initialized")
-                return ["No documents available."]
-                
-            # Get query embedding without pooling parameter
-            query_embedding = self.embeddings_client.feature_extraction(query)
-            
-            # Search index
-            D, I = self.index.search(
-                np.array([query_embedding]).astype('float32'), 
-                k
-            )
-            
-            print(f"\nSearch distances: {D[0]}")
-            
-            # Filter by similarity threshold
-            results = []
-            for i, (dist, idx) in enumerate(zip(D[0], I[0])):
-                similarity = 1 / (1 + dist)  # Convert distance to similarity
-                if similarity < 0.5:  # Increased threshold
-                    print(f"Document {i+1} below similarity threshold ({similarity:.2f})")
-                    continue
-                    
-                if idx < len(self.documents):
-                    doc = self.documents[idx]
-                    print(f"\nDocument {i+1} (similarity: {similarity:.2f})")
-                    print(f"Content length: {len(doc['content'])} chars")
-                    results.append(doc["content"])
-                    
-            return results if results else ["No sufficiently relevant documents found."]
-            
-        except Exception as e:
-            print(f"Search error: {str(e)}")
-            return ["An error occurred during search."]
+        """Searches for relevant documents using vector similarity."""
+
+
+        embedding_responses = embeddings_client.post(
+            json={"inputs": [query]}, task="feature-extraction"
+        )
+        query_embedding = json.loads(embedding_responses.decode())
+        D, I = self.index.search(np.array(query_embedding), k)
+        results = [self.documents[i]["content"] for i in I[0]]
+        return results if results else ["No relevant documents found."]
 
 
 def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
     """Chunk text into pieces of specified size with overlap, considering separators."""
-    
+
     # Split the text by the separators
     for sep in separators:
         text = text.replace(sep, "\n")
-        
+
     chunks = []
     start = 0
-    
+
     while start < len(text):
         # Determine the end of the chunk, accounting for overlap and the chunk size
         end = min(len(text), start + chunk_size)
-        
+
         # Find a natural break point at the newline to avoid cutting words
         if end < len(text):
             while end > start and text[end] != "\n":
                 end -= 1
-                
-        chunk = text[start:end].strip()
-        
-        # Log chunk information
-        print(f"Chunk size: {len(chunk)} characters")
-        if len(chunk) > chunk_size:
-            print(f"Warning: Chunk exceeds size limit: {len(chunk)}")
-            
+
+        chunk = text[start:end].strip()  # Strip trailing whitespace
         chunks.append(chunk)
-        
+
         # Move the start position forward by the overlap size
         start += chunk_size - overlap_size
-        
-    # Log overall chunking statistics
-    if chunks:
-        avg_size = sum(len(c) for c in chunks) / len(chunks)
-        print(f"Number of chunks: {len(chunks)}")
-        print(f"Average chunk size: {avg_size:.2f} characters")
-        
+
     return chunks
 
 
-def load_and_chunk_pdf(file_path, chunk_size=1000, overlap=100):
-    """Extract and chunk text from PDF with improved handling"""
-    try:
-        with pymupdf.open(file_path) as pdf:
-            full_text = ""
-            for page in pdf:
-                text = page.get_text()
-                if text.strip():  # Only add non-empty pages
-                    full_text += text + "\n\n"
-            
-            if not full_text.strip():
-                print(f"Warning: No text extracted from {file_path}")
-                return []
-            
-            # Create chunks with overlap
-            chunks = []
-            start = 0
-            
-            while start < len(full_text):
-                # Find a good break point
-                end = min(start + chunk_size, len(full_text))
-                if end < len(full_text):
-                    # Try to break at sentence boundary
-                    for sep in [". ", ".\n", "\n\n", " "]:
-                        break_point = full_text.rfind(sep, start, end)
-                        if break_point != -1:
-                            end = break_point + 1
-                            break
-                
-                chunk = full_text[start:end].strip()
-                if chunk:  # Only add non-empty chunks
-                    chunks.append({
-                        "content": chunk,
-                        "metadata": {
-                            "start_char": start,
-                            "end_char": end,
-                            "chunk_size": len(chunk)
-                        }
-                    })
-                
-                # Move start position, accounting for overlap
-                start = max(start + 1, end - overlap)
-            
-            print(f"Created {len(chunks)} chunks from PDF")
-            return chunks
-            
-    except Exception as e:
-        print(f"Error processing PDF {file_path}: {str(e)}")
-        return []
+def load_and_chunk_pdf(file_path):
+    """Extracts text from a PDF file and stores it in the property documents by chunks."""
+
+    with pymupdf.open(file_path) as pdf:
+        text = ""
+        for page in pdf:
+            text += page.get_text()
+
+        chunks = chunk_text(text)
+        documents = []
+        for chunk in chunks:
+            documents.append({"content": chunk, "metadata": pdf.metadata})
+
+        return documents
 
 
 def load_pdf(file_path):
@@ -643,300 +378,104 @@ def load_pdf(file_path):
     return documents
 
 
-def initialize_rag_system(token, progress=gr.Progress()):
-    """Initialize RAG system with improved document processing"""
-    progress(0, desc="Starting RAG initialization")
+def prepare_all_files_for_chat(token, progress=gr.Progress()):
+    """Parse all files from all records and prepare RAG."""
     
+    progress(0, desc="Starting")
     # Create connection to kadi
     manager = KadiManager(instance=instance, host=host, pat=token)
     
-    # Get all records with better pagination
+    progress(0.1, desc="Getting all records...")
+    # Get all records first
     host_api = manager.host if manager.host.endswith("/") else manager.host + "/"
-    searched_resource = "records"
-    endpoint = urljoin(host_api, searched_resource)
-    
+    endpoint = urljoin(host_api, "records")
     response = manager.search.search_resources("record", per_page=100)
     parsed = json.loads(response.content)
+    total_pages = parsed["_pagination"]["total_pages"]
     
-    # Get pagination info - handle missing fields
-    pagination = parsed.get("_pagination", {})
-    total_pages = pagination.get("total_pages", 1)
-    per_page = pagination.get("per_page", 100)
-    
-    # Get initial page items count
-    initial_items = len(parsed.get("items", []))
-    
-    # Estimate total records more safely
-    if total_pages == 1:
-        total_records = initial_items
-    else:
-        # Estimate based on full pages plus last page
-        total_records = (total_pages - 1) * per_page + initial_items
-    
-    progress(0.1, desc=f"Found approximately {total_records} records to process")
-    
-    # Initialize RAG
-    rag_system = SimpleRAG()
-    processed_records = 0
-    
-    # Process each record with detailed logging
+    # Collect all record identifiers
+    all_records_identifiers = []
     for page in range(1, total_pages + 1):
+        progress(0.1 + (0.1 * page/total_pages), desc=f"Getting records page {page}/{total_pages}")
+        page_endpoint = endpoint + f"?page={page}&per_page=100"
+        response = manager.make_request(page_endpoint)
+        parsed = json.loads(response.content)
+        all_records_identifiers.extend([item["identifier"] for item in parsed["items"]])
+    
+    progress(0.2, desc="Processing files from records...")
+    documents = []
+    total_records = len(all_records_identifiers)
+    
+    # Process each record
+    for idx, record_id in enumerate(all_records_identifiers):
+        progress(0.2 + (0.4 * idx/total_records), desc=f"Processing record {idx+1}/{total_records}")
         try:
-            progress(0.1 + (0.4 * page/total_pages), 
-                    desc=f"Processing records page {page}/{total_pages}")
+            record = manager.record(identifier=record_id)
+            file_list = record.get_filelist().json()["items"]
             
-            # Get page data
-            if page == 1:
-                # Use already fetched first page
-                page_data = parsed
-            else:
-                page_endpoint = endpoint + f"?page={page}&per_page={per_page}"
-                response = manager.make_request(page_endpoint)
-                page_data = json.loads(response.content)
-            
-            items = page_data.get("items", [])
-            if not items:
-                print(f"Warning: No items found on page {page}")
-                continue
-                
-            print(f"Processing page {page} with {len(items)} records")
-            
-            # Process each record
-            for item in items:
-                try:
-                    record = manager.record(identifier=item["identifier"])
-                    file_num = record.get_number_files()
-                    print(f"\nProcessing record {item['identifier']} with {file_num} files")
-                    
-                    if file_num == 0:
-                        print(f"Skipping record {item['identifier']}: no files")
-                        continue
-                    
-                    # Calculate pages needed for files
-                    pages_needed = (file_num + 99) // 100  # Ceiling division
-                    
-                    # Get all files in the record
-                    for p in range(1, pages_needed + 1):
-                        try:
-                            files_response = record.get_filelist(page=p, per_page=100)
-                            files = files_response.json()["items"]
-                            print(f"Processing file page {p}/{pages_needed} ({len(files)} files)")
-                            
-                            # Process each file
-                            for file_info in files:
-                                file_id = file_info["id"]
-                                file_name = file_info["name"]
-                                
-                                if file_name.lower().endswith('.pdf'):
-                                    print(f"Processing PDF: {file_name}")
-                                    with tempfile.TemporaryDirectory(prefix="tmp-kadichat-") as temp_dir:
-                                        temp_file_location = os.path.join(temp_dir, file_name)
-                                        try:
-                                            record.download_file(file_id, temp_file_location)
-                                            
-                                            # Parse document with chunk size validation
-                                            docs = load_and_chunk_pdf(temp_file_location)
-                                            print(f"Generated {len(docs)} chunks from {file_name}")
-                                            
-                                            if not docs:
-                                                print(f"Warning: No chunks generated from {file_name}")
-                                                continue
-                                            
-                                            # Add record metadata to each chunk
-                                            for doc in docs:
-                                                doc["metadata"] = {
-                                                    "record_id": item["identifier"],
-                                                    "file_name": file_name,
-                                                    "chunk_size": len(doc["content"])
-                                                }
-                                            
-                                            # Add chunks to RAG system
-                                            rag_system.add_documents(docs)
-                                            
-                                        except Exception as e:
-                                            print(f"Error processing file {file_name}: {str(e)}")
-                                            continue
-                                            
-                        except Exception as e:
-                            print(f"Error processing file page {p}: {str(e)}")
-                            continue
-                    
-                    processed_records += 1
-                    print(f"Processed {processed_records}/{total_records} records")
-                    
-                except Exception as e:
-                    print(f"Error processing record {item['identifier']}: {str(e)}")
-                    continue
-                    
+            # Process each file in the record
+            for file_info in file_list:
+                file_name = file_info["name"]
+                if file_name.lower().endswith('.pdf'):  # Only process PDFs
+                    file_id = record.get_file_id(file_name)
+                    with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+                        temp_file_location = os.path.join(temp_dir, file_name)
+                        record.download_file(file_id, temp_file_location)
+                        docs = load_and_chunk_pdf(temp_file_location)
+                        documents.extend(docs)
         except Exception as e:
-            print(f"Error processing page {page}: {str(e)}")
+            print(f"Error processing record {record_id}: {str(e)}")
             continue
-    
-    progress(0.8, desc="Building vector database...")
-    
-    try:
-        if len(rag_system.documents) == 0:
-            raise ValueError("No documents were processed successfully")
-        
-        rag_system.build_vector_db()
-        print(f"Successfully built index with {len(rag_system.documents)} documents")
-        
-        # Test search functionality
-        test_results = rag_system.search_documents("test query")
-        print(f"Index validation: retrieved {len(test_results)} results")
-        
-    except Exception as e:
-        print(f"Error building vector database: {str(e)}")
-        raise
-    
-    progress(1.0, desc=f"RAG system ready with {len(rag_system.documents)} documents")
-    return f"RAG system initialized with {len(rag_system.documents)} documents", rag_system
+
+    progress(0.7, desc="Building vector database...")
+    user_rag = SimpleRAG()
+    user_rag.documents = documents
+    user_rag.embeddings_model = embeddings_model
+    user_rag.build_vector_db()
+
+    progress(1, desc="Ready to chat")
+    return "Vector database ready with all available documents", user_rag
 
 
 def preprocess_response(response: str) -> str:
-    """Enhanced preprocessing of LLM responses."""
-    
-    if not response:
-        return ""
-        
-    # Basic cleanup
-    response = response.strip()
-    
-    # Remove common LLM artifacts
-    artifacts_to_remove = [
-        '<|endoftext|>',
-        '<|im_start|>',
-        '<|im_end|>',
-        '```',
-        '===',
-    ]
-    for artifact in artifacts_to_remove:
-        response = response.replace(artifact, '')
-    
-    # Fix spacing around punctuation
-    punctuation_fixes = {
-        ' ,': ',',
-        ' .': '.',
-        ' !': '!',
-        ' ?': '?',
-        ' :': ':',
-        ' ;': ';',
-        '( ': '(',
-        ' )': ')',
-    }
-    for wrong, right in punctuation_fixes.items():
-        response = response.replace(wrong, right)
-    
-    # Remove multiple spaces and newlines
-    response = ' '.join(response.split())
-    
-    # Ensure proper sentence structure
-    if response and response[0].islower():
-        response = response[0].upper() + response[1:]
-    
-    # Ensure proper ending
-    if response and not response[-1] in '.!?':
-        response += '.'
-    
+    """Preprocesses the response to make it more polished."""
+
+
     return response
 
 
-@rate_limit(max_per_minute=30)
-def respond(message: str, history: List[Tuple[str, str]], user_session_rag) -> Tuple[List[Tuple[str, str]], str]:
-    """Enhanced response handler with better context management."""
-    
-    try:
-        if not message.strip():
-            return history, "Please provide a valid message."
-            
-        # Get and log relevant documents
-        try:
-            retrieved_docs = user_session_rag.search_documents(message)
-            print(f"\nRetrieved {len(retrieved_docs)} documents")
-        except Exception as e:
-            print(f"Document retrieval error: {str(e)}")
-            retrieved_docs = []
-            
-        # Improved context management
-        max_context_tokens = 3072  # Reduced from 4096 to leave more room
-        max_response_tokens = 1024
-        system_message_tokens = 200  # Approximate
-        
-        available_tokens = max_context_tokens - max_response_tokens - system_message_tokens
-        
-        # Build context with token counting
-        context_parts = []
-        total_tokens = 0
-        
-        for doc in retrieved_docs[:3]:
-            doc_tokens = count_tokens(doc)
-            print(f"Document tokens: {doc_tokens}")
-            
-            if total_tokens + doc_tokens > available_tokens:
-                print(f"Skipping document, would exceed token limit ({total_tokens + doc_tokens} > {available_tokens})")
-                break
-                
-            context_parts.append(doc)
-            total_tokens += doc_tokens
-            print(f"Added document. Total tokens: {total_tokens}")
-            
-        context = "\n\n---\n\n".join(context_parts)
-        
-        # Update your prompt template to be cleaner and simpler
-        PROMPT_TEMPLATE = """
-        [INST]
-        Context: {context}
-        Question: {question}
+def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
+    """Get respond from LLMs."""
 
-        Please answer the question based on the context provided. If the information is not in the context, say "I don't have enough information to answer that question."
-        [/INST]
-        """
+    # message is the current input query from user
+    # RAG
+    retrieved_docs = user_session_rag.search_documents(message)
+    context = "\n".join(retrieved_docs)
+    system_message = "You are an assistant to help user to answer question related to Kadi based on Relevant documents.\nRelevant documents: {}".format(
+        context
+    )
+    messages = [{"role": "assistant", "content": system_message}]
 
-        # More focused system message
-        system_message = PROMPT_TEMPLATE.format(context=context, question=message)
-        
-        messages = [{"role": "system", "content": system_message}]
-        
-        # Add limited history
-        history_tokens = 0
-        recent_history = []
-        
-        for msg in reversed(history[-3:]):  # Reduced from 5 to 3 messages
-            msg_tokens = count_tokens(msg[0]) + count_tokens(msg[1])
-            if history_tokens + msg_tokens > available_tokens // 3:  # Reduced history allocation
-                break
-            recent_history.insert(0, msg)
-            history_tokens += msg_tokens
-            
-        print(f"History tokens: {history_tokens}")
-        
-        for user_msg, assistant_msg in recent_history:
-            messages.extend([
-                {"role": "user", "content": user_msg},
-                {"role": "assistant", "content": assistant_msg}
-            ])
-            
-        messages.append({"role": "user", "content": message})
-        
-        # Log total context size
-        total_prompt_tokens = sum(count_tokens(m["content"]) for m in messages)
-        print(f"Total prompt tokens: {total_prompt_tokens}")
-        
-        # Get response with error handling
-        try:
-            response_content = get_llm_response(messages)
-            history.append((message, response_content))
-            return history, ""
-            
-        except ValueError as e:
-            return history, f"Response generation error: {str(e)}"
-        except Exception as e:
-            print(f"Response error: {str(e)}")
-            return history, "An error occurred. Please try again."
-            
-    except Exception as e:
-        print(f"Critical error: {str(e)}")
-        return history, "An unexpected error occurred."
+
+
+    messages.append({"role": "user", "content": f"\nQuestion: {message}"})
+
+    response = client.chat_completion(
+        messages, max_tokens=2048, temperature=0.0
+    )  # , top_p=0.9)
+    response_content = "".join(
+        [
+            choice.message["content"]
+            for choice in response.choices
+            if "content" in choice.message
+        ]
+    )
+
+    # Process response
+    polished_response = preprocess_response(response_content)
+
+    history.append((message, polished_response))
+    return history, ""
 
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
@@ -944,7 +483,11 @@ app = gr.mount_gradio_app(app, login_demo, path="/main")
 
 # Gradio interface
 with gr.Blocks() as main_demo:
+
+    # State for storing user token
     _state_user_token = gr.State([])
+
+    # State for user rag
     user_session_rag = gr.State("placeholder")
 
     with gr.Row():
@@ -959,27 +502,29 @@ with gr.Blocks() as main_demo:
             with gr.Column(scale=7):
                 chatbot = gr.Chatbot()
             with gr.Column(scale=3):
-                status_box = gr.Textbox(
-                    label="Status", 
-                    value="Initializing...", 
-                    interactive=False
-                )
+                load_files = gr.Button("Load All Documents")
+                message_box = gr.Textbox(label="", value="Click 'Load All Documents' to start", interactive=False)
                 
+                # Load all files when button is clicked
+                load_files.click(
+                    fn=prepare_all_files_for_chat,
+                    inputs=[_state_user_token],
+                    outputs=[message_box, user_session_rag],
+                )
+
         with gr.Row():
             txt_input = gr.Textbox(
-                show_label=False,
-                placeholder="Type your question here...",
-                lines=1
+                show_label=False, placeholder="Type your question here...", lines=1
             )
             submit_btn = gr.Button("Submit", scale=1)
             refresh_btn = gr.Button("Refresh Chat", scale=1, variant="secondary")
 
-        # Initialize RAG system on load
-        main_demo.load(_init_user_token, None, _state_user_token).then(
-            initialize_rag_system,
-            inputs=[_state_user_token],
-            outputs=[status_box, user_session_rag]
-        )
+        example_questions = [
+            ["Summarize the paper."],
+            ["how to create record in kadi4mat?"],
+        ]
+
+        gr.Examples(examples=example_questions, inputs=[txt_input])
 
         # Actions
         txt_input.submit(
@@ -995,38 +540,6 @@ with gr.Blocks() as main_demo:
         refresh_btn.click(lambda: [], None, chatbot)
 
 app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
-
-
-def validate_model_tokenizer():
-    """Validate LLaMA 3 model and tokenizer"""
-    try:
-        # Test tokenization
-        test_text = "Hello, this is a test."
-        tokens = tokenizer.encode(test_text)
-        decoded = tokenizer.decode(tokens)
-        if not decoded.strip():
-            raise ValueError("Tokenizer validation failed")
-        
-        # Test generation with correct parameters
-        response = llm_client.text_generation(
-            test_text,
-            max_new_tokens=10,
-            temperature=0.7,
-            top_p=0.9,
-            repetition_penalty=1.2,
-            do_sample=True,
-            stop_sequences=["</s>", "[INST]", "\n\n\n"]
-        )
-        
-        if not response.strip():
-            raise ValueError("Model validation failed")
-        
-    except Exception as e:
-        print(f"LLaMA 3 validation error: {str(e)}")
-        raise
-
-# Call validation during startup
-validate_model_tokenizer()
 
 
 if __name__ == "__main__":
