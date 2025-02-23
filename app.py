@@ -218,9 +218,13 @@ def get_all_records(user_token, progress=gr.Progress()):
 
 def _init_user_token(request: gr.Request):
     """Init user token."""
-
-    user_token = request.request.session["user_access_token"]
-    return user_token
+    try:
+        user_token = request.request.session["user_access_token"]
+        print("Token initialized:", user_token is not None)  # Debug print
+        return user_token
+    except Exception as e:
+        print("Error initializing token:", e)
+        return None
 
 
 # Landing page for login
@@ -524,18 +528,26 @@ with gr.Blocks() as main_demo:
 
 
             with gr.Column(scale=3):
-                record_list = gr.State([])  # Changed to State since we don't need to display it
-                file_list = gr.State([])    # New State for storing files
+                record_list = gr.State([])
+                file_list = gr.State([])
                 
                 load_files_btn = gr.Button("Load All Files")
                 progress_box = gr.Textbox(label="Progress", value="Click 'Load All Files' to start", interactive=False)
-                progress_bar = gr.Progress()  # Added progress bar
+                debug_box = gr.Textbox(label="Debug Info", interactive=False)  # Added for debugging
                 
-                # Initialize user token
-                main_demo.load(_init_user_token, None, _state_user_token)
+                # Initialize user token with debug output
+                main_demo.load(
+                    _init_user_token, 
+                    None, 
+                    [_state_user_token, debug_box],
+                )
 
                 # Chain of operations when button is clicked
                 load_files_btn.click(
+                    fn=lambda x: f"Token value: {x}", # Debug function
+                    inputs=[_state_user_token],
+                    outputs=[debug_box],
+                ).then(
                     fn=get_all_records,
                     inputs=[_state_user_token],
                     outputs=[record_list],
