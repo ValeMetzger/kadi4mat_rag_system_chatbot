@@ -220,11 +220,13 @@ def _init_user_token(request: gr.Request):
     """Init user token."""
     try:
         user_token = request.request.session["user_access_token"]
-        print("Token initialized:", user_token is not None)  # Debug print
-        return user_token
+        debug_msg = f"Token initialized: {user_token is not None}"
+        print(debug_msg)  # Debug print
+        return user_token, debug_msg
     except Exception as e:
-        print("Error initializing token:", e)
-        return None
+        error_msg = f"Error initializing token: {e}"
+        print(error_msg)
+        return None, error_msg
 
 
 # Landing page for login
@@ -533,7 +535,7 @@ with gr.Blocks() as main_demo:
                 
                 load_files_btn = gr.Button("Load All Files")
                 progress_box = gr.Textbox(label="Progress", value="Click 'Load All Files' to start", interactive=False)
-                debug_box = gr.Textbox(label="Debug Info", interactive=False)  # Added for debugging
+                debug_box = gr.Textbox(label="Debug Info", interactive=False)
                 
                 # Initialize user token with debug output
                 main_demo.load(
