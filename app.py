@@ -115,7 +115,10 @@ async def login(request: Request):
     root_url = gr.route_utils.get_root_url(request, "/login", None)
     redirect_uri = request.url_for("auth")  # f"{root_url}/auth"
     redirect_uri = redirect_uri.replace(scheme="https")  # required by Kadi
-
+    # print("-----------in login")
+    # print("root_urlt", root_url)
+    # print("redirect_uri", redirect_uri)
+    # print("request", request)
     return await oauth.kadi4mat.authorize_redirect(request, redirect_uri)
 
 
@@ -123,6 +126,9 @@ async def login(request: Request):
 @app.route("/auth")
 async def auth(request: Request):
     root_url = gr.route_utils.get_root_url(request, "/auth", None)
+    # print("*****+ in auth")
+    # print("root_urlt", root_url)
+    # print("request", request)
     try:
         access_token = await oauth.kadi4mat.authorize_access_token(request)
         request.session["user_access_token"] = access_token["access_token"]
@@ -140,49 +146,31 @@ def greet(request: gr.Request):
     return f"Welcome to Kadichat, you're logged in as: {request.username}"
 
 
-def get_files_in_record(record_id, user_token, top_k=10):
+def get_files_in_record(record_id, user_token):
     """Get all file list within one record."""
-
     manager = KadiManager(instance=instance, host=host, pat=user_token)
 
     try:
         record = manager.record(identifier=record_id)
     except kadi_apy.lib.exceptions.KadiAPYInputError as e:
-        raise gr.Error(e)
+        print(f"Error accessing record {record_id}: {e}")
+        return []
 
     file_num = record.get_number_files()
+    if file_num == 0:
+        return []
 
-    per_page = 100  # default in kadi
-    not_divisible = file_num % per_page
-    if not_divisible:
-        page_num = file_num // per_page + 1
-    else:
-        page_num = file_num // per_page
+    per_page = 100
+    page_num = (file_num + per_page - 1) // per_page
 
     file_names = []
-    for p in range(1, page_num + 1):  # page starts at 1 in kadi
-        file_names.extend(
-            [
-                info["name"]
-                for info in record.get_filelist(page=p, per_page=per_page).json()[
-                    "items"
-                ]
-            ]
-        )
+    for p in range(1, page_num + 1):
+        file_names.extend([
+            info["name"] 
+            for info in record.get_filelist(page=p, per_page=per_page).json()["items"]
+        ])
 
-    assert file_num == len(
-        file_names
-    ), "Number of files did not match, please check function get_all_file_names."
-
-    # return file_names[:top_k]
-    return gr.Dropdown(
-        choices=file_names[:top_k],
-        label="Select file",
-        info="Select (max. 3) files to chat with.",
-        multiselect=True,
-        max_choices=3,
-        interactive=True,
-    )
+    return file_names
 
 
 def get_all_records(user_token):
@@ -219,7 +207,12 @@ def get_all_records(user_token):
         parsed = json.loads(response.content)
         all_records_identifiers.extend(get_page_records(parsed))
 
-    return all_records_identifiers
+    return gr.Dropdown(
+        choices=all_records_identifiers,
+        interactive=True,
+        label="Record Identifier",
+        info="Select record to get file list",
+    )
 
 
 def _init_user_token(request: gr.Request):
@@ -275,7 +268,8 @@ class SimpleRAG:
         self.embeddings_model = None
         self.embeddings = None
         self.index = None
-
+        # self.load_pdf("Brandt et al_2024_Kadi_info_page.pdf")
+        # self.build_vector_db()
 
     def load_pdf(self, file_path: str) -> None:
         """Extracts text from a PDF file and stores it in the property documents by page."""
@@ -293,9 +287,13 @@ class SimpleRAG:
         if self.embeddings_model is None:
             self.embeddings_model = SentenceTransformer(
                 "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
-            )  
+            )  # jinaai/jina-embeddings-v2-base-de?
 
-
+        # Use local model
+        # print("now doing embedding")
+        # print("len of documents", len(self.documents))
+        # embedding_responses = embeddings_client.post(json={"inputs":[doc["content"] for doc in self.documents]}, task="feature-extraction")
+        # self.embeddings = np.array(json.loads(embedding_responses.decode()))
         self.embeddings = self.embeddings_model.encode(
             [doc["content"] for doc in self.documents], show_progress_bar=True
         )
@@ -305,28 +303,16 @@ class SimpleRAG:
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
-        
-        try:
-            # Get query embedding using the same model as used for document embeddings
-            query_embedding = self.embeddings_model.encode([query])[0]  # Get first element as it's a single query
-            
-            # Reshape the query embedding to match what Faiss expects (2D array)
-            query_embedding = query_embedding.reshape(1, -1)
-            
-            # Ensure dimensions match
-            if query_embedding.shape[1] != self.index.d:
-                raise ValueError(f"Query embedding dimension ({query_embedding.shape[1]}) does not match index dimension ({self.index.d})")
-            
-            # Search using Faiss
-            D, I = self.index.search(query_embedding, k)
-            
-            # Get the corresponding documents
-            results = [self.documents[i]["content"] for i in I[0]]
-            return results if results else ["No relevant documents found."]
-            
-        except Exception as e:
-            print(f"Search error: {str(e)}")
-            return ["Error during search: Please try again."]
+
+        # Use embeddings_client
+        # query_embedding = self.embeddings_model.encode([query], show_progress_bar=False)
+        embedding_responses = embeddings_client.post(
+            json={"inputs": [query]}, task="feature-extraction"
+        )
+        query_embedding = json.loads(embedding_responses.decode())
+        D, I = self.index.search(np.array(query_embedding), k)
+        results = [self.documents[i]["content"] for i in I[0]]
+        return results if results else ["No relevant documents found."]
 
 
 def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
@@ -387,78 +373,63 @@ def load_pdf(file_path):
 
 
 def prepare_all_files_for_chat(token, progress=gr.Progress()):
-    """Parse all files from all records and prepare RAG."""
-    
-    if not token:
-        raise gr.Error("No authentication token found. Please log in again.")
-    
+    """Parse and embed all files from all records."""
     progress(0, desc="Starting")
-    try:
-        # Create connection to kadi with the token as pat
-        manager = KadiManager(instance=instance, host=host, pat=token)  # Changed from token to pat
-        
-        progress(0.1, desc="Getting all records...")
-        # Get all records using the search functionality
-        response = manager.search.search_resources("record", per_page=100)
+    
+    # Get all records
+    manager = KadiManager(instance=instance, host=host, pat=token)
+    response = manager.search.search_resources("record", per_page=100)
+    parsed = json.loads(response.content)
+    total_pages = parsed["_pagination"]["total_pages"]
+    
+    # Collect all record IDs
+    all_records = []
+    for page in range(1, total_pages + 1):
+        endpoint = f"{manager.host}/api/records?page={page}&per_page=100"
+        response = manager.make_request(endpoint)
         parsed = json.loads(response.content)
-        
-        if 'code' in parsed and parsed['code'] == 401:
-            raise gr.Error("Authentication failed. Please log in again.")
+        all_records.extend([item["identifier"] for item in parsed["items"]])
+    
+    progress(0.2, desc="Loading files from all records...")
+    
+    # Collect all documents
+    documents = []
+    for record_id in all_records:
+        file_names = get_files_in_record(record_id, token)
+        if not file_names:
+            continue
             
-        # Get all record identifiers from the search results
-        all_records_identifiers = []
-        if isinstance(parsed, list):
-            all_records_identifiers = [item["identifier"] for item in parsed]
-        elif "items" in parsed:
-            all_records_identifiers = [item["identifier"] for item in parsed["items"]]
-        else:
-            raise gr.Error("Unexpected API response format")
-        
-        if not all_records_identifiers:
-            raise gr.Error("No records found")
-            
-        progress(0.2, desc="Processing files from records...")
-        documents = []
-        total_records = len(all_records_identifiers)
-        
-        # Process each record
-        for idx, record_id in enumerate(all_records_identifiers):
-            progress(0.2 + (0.4 * idx/total_records), desc=f"Processing record {idx+1}/{total_records}")
-            try:
-                record = manager.record(identifier=record_id)
-                file_list = record.get_filelist().json()["items"]
-                
-                # Process each file in the record
-                for file_info in file_list:
-                    file_name = file_info["name"]
-                    if file_name.lower().endswith('.pdf'):  # Only process PDFs
-                        file_id = record.get_file_id(file_name)
-                        with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-                            temp_file_location = os.path.join(temp_dir, file_name)
-                            record.download_file(file_id, temp_file_location)
-                            docs = load_and_chunk_pdf(temp_file_location)
-                            documents.extend(docs)
-            except Exception as e:
-                print(f"Error processing record {record_id}: {str(e)}")
-                continue
+        record = manager.record(identifier=record_id)
+        for file_name in file_names:
+            file_id = record.get_file_id(file_name)
+            with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+                temp_file_location = os.path.join(temp_dir, file_name)
+                record.download_file(file_id, temp_file_location)
+                docs = load_and_chunk_pdf(temp_file_location)
+                documents.extend(docs)
 
-        progress(0.7, desc="Building vector database...")
-        user_rag = SimpleRAG()
-        user_rag.documents = documents
-        user_rag.embeddings_model = embeddings_model
-        user_rag.build_vector_db()
-
-        progress(1, desc="Ready to chat")
-        return "Vector database ready with all available documents", user_rag
-        
-    except Exception as e:
-        raise gr.Error(f"Error: {str(e)}")
+    progress(0.8, desc="Building vector database...")
+    user_rag = SimpleRAG()
+    user_rag.documents = documents
+    user_rag.embeddings_model = embeddings_model
+    user_rag.build_vector_db()
+    
+    progress(1, desc="Ready to chat")
+    return "Vector database ready with all files", user_rag
 
 
 def preprocess_response(response: str) -> str:
     """Preprocesses the response to make it more polished."""
 
+    # Placeholder for preprocessing
 
+    # response = response.strip()
+    # response = response.replace("\n\n", "\n")
+    # response = response.replace(" ,", ",")
+    # response = response.replace(" .", ".")
+    # response = " ".join(response.split())
+    # if not any(word in response.lower() for word in ["sorry", "apologize", "empathy"]):
+    #     response = "I'm here to help. " + response
     return response
 
 
@@ -474,10 +445,19 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     )
     messages = [{"role": "assistant", "content": system_message}]
 
-
+    # Add history for conversational chat, TODO
+    # for val in history:
+    #     #if val[0]:
+    #     messages.append({"role": "user", "content": val[0]})
+    #     #if val[1]:
+    #     messages.append({"role": "assistant", "content": val[1]})
 
     messages.append({"role": "user", "content": f"\nQuestion: {message}"})
 
+    # print("-----------------")
+    # print(messages)
+    # print("-----------------")
+    # Get anwser from LLM
     response = client.chat_completion(
         messages, max_tokens=2048, temperature=0.0
     )  # , top_p=0.9)
@@ -503,7 +483,7 @@ app = gr.mount_gradio_app(app, login_demo, path="/main")
 with gr.Blocks() as main_demo:
 
     # State for storing user token
-    _state_user_token = gr.State()
+    _state_user_token = gr.State([])
 
     # State for user rag
     user_session_rag = gr.State("placeholder")
@@ -520,17 +500,12 @@ with gr.Blocks() as main_demo:
             with gr.Column(scale=7):
                 chatbot = gr.Chatbot()
             with gr.Column(scale=3):
-                load_files = gr.Button("Load All Documents")
-                message_box = gr.Textbox(label="", value="Click 'Load All Documents' to start", interactive=False)
+                load_files_btn = gr.Button("Load All Files")
+                message_box = gr.Textbox(label="", value="Click 'Load All Files' to start", interactive=False)
                 
-                # Initialize the token state when the interface loads
-                def init_token(request: gr.Request):
-                    return request.request.session.get("user_access_token", None)
-                
-                main_demo.load(init_token, None, _state_user_token)
-                
-                # Load all files when button is clicked
-                load_files.click(
+                # Initialize user token and prepare RAG system
+                main_demo.load(_init_user_token, None, _state_user_token)
+                load_files_btn.click(
                     fn=prepare_all_files_for_chat,
                     inputs=[_state_user_token],
                     outputs=[message_box, user_session_rag],
