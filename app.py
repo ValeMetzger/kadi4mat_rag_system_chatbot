@@ -177,9 +177,9 @@ def get_files_in_record(all_records_identifiers, user_token):
 
     return all_file_names
 
-def get_all_records(user_token):
+def get_all_records(user_token, progress=gr.Progress()):
     """Get all record list in Kadi."""
-
+    progress(0, desc="Starting record collection...")
     if not user_token:
         return []
 
@@ -204,8 +204,10 @@ def get_all_records(user_token):
 
         return item_identifiers
 
+    progress(0.5, desc="Fetching records...")
     all_records_identifiers = []
     for page in range(1, total_pages + 1):
+        progress(0.5 + (0.5 * page/total_pages), desc=f"Processing page {page}/{total_pages}")
         page_endpoint = endpoint + f"?page={page}&per_page=100"
         response = manager.make_request(page_endpoint)
         parsed = json.loads(response.content)
@@ -522,30 +524,32 @@ with gr.Blocks() as main_demo:
 
 
             with gr.Column(scale=3):
-                record_list = []
-
-                load_files_btn = gr.Button("Load All Files")
-                message_box = gr.Textbox(label="", value="Click 'Load All Files' to start", interactive=False)
+                record_list = gr.State([])  # Changed to State since we don't need to display it
+                file_list = gr.State([])    # New State for storing files
                 
-                # Initialize user token and prepare RAG system
-                main_demo.load(_init_user_token, None, _state_user_token).then(
-                    get_all_records, _state_user_token, record_list
-                )
+                load_files_btn = gr.Button("Load All Files")
+                progress_box = gr.Textbox(label="Progress", value="Click 'Load All Files' to start", interactive=False)
+                progress_bar = gr.Progress()  # Added progress bar
+                
+                # Initialize user token
+                main_demo.load(_init_user_token, None, _state_user_token)
 
-                record_list.select(
-                    fn=get_files_in_record,
-                    inputs=[record_list, _state_user_token]
-                )
-
+                # Chain of operations when button is clicked
                 load_files_btn.click(
-                    fn=prepare_file_for_chat,
+                    fn=get_all_records,
                     inputs=[_state_user_token],
-                    outputs=[message_box, user_session_rag],
-                )
-                load_files_btn.click(
+                    outputs=[record_list],
+                    show_progress=True,
+                ).then(
+                    fn=get_files_in_record,
+                    inputs=[record_list, _state_user_token],
+                    outputs=[file_list],
+                    show_progress=True,
+                ).then(
                     fn=prepare_file_for_chat,
-                    inputs=[record_list, record_file_dropdown, _state_user_token],
-                    outputs=[message_box, user_session_rag],
+                    inputs=[record_list, file_list, _state_user_token],
+                    outputs=[progress_box, user_session_rag],
+                    show_progress=True,
                 )
 
 
