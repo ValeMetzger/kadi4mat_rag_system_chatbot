@@ -202,7 +202,7 @@ def get_all_records(user_token):
     response = manager.search.search_resources("record", per_page=100)
     parsed = json.loads(response.content)
 
-    total_pages = parsed["_pagination"]["total_pages"]
+    total_pages = parsed["pagination"]["total_pages"]
 
     def get_page_records(parsed_content):
         item_identifiers = []
