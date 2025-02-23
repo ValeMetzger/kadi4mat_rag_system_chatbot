@@ -299,41 +299,61 @@ class SimpleRAG:
         # print("PDF processed successfully!")
 
     def build_vector_db(self) -> None:
-        """Builds a vector database using the content of the PDF."""
+        """Builds a vector database with dimension debugging."""
         if self.embeddings_model is None:
             self.embeddings_model = SentenceTransformer(
-                "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
-            )  # jinaai/jina-embeddings-v2-base-de?
+                "sentence-transformers/all-mpnet-base-v2", 
+                trust_remote_code=True
+            )
 
-        # Use local model
-        # print("now doing embedding")
-        # print("len of documents", len(self.documents))
-        # embedding_responses = embeddings_client.post(json={"inputs":[doc["content"] for doc in self.documents]}, task="feature-extraction")
-        # self.embeddings = np.array(json.loads(embedding_responses.decode()))
+        # Debug document count
+        print(f"Number of documents to embed: {len(self.documents)}")
+        
+        # Get embeddings
         self.embeddings = self.embeddings_model.encode(
-            [doc["content"] for doc in self.documents], show_progress_bar=True
+            [doc["content"] for doc in self.documents],
+            show_progress_bar=True
         )
-        self.index = faiss.IndexFlatL2(self.embeddings.shape[1])
+        
+        # Debug embedding dimensions
+        print(f"Embeddings shape: {self.embeddings.shape}")
+        print(f"Expected dimension: 768")  # mpnet-base-v2 dimension
+        
+        # Initialize FAISS index
+        dimension = self.embeddings.shape[1]
+        self.index = faiss.IndexFlatL2(dimension)
+        print(f"FAISS index dimension: {self.index.d}")
+        
+        # Add vectors to index
         self.index.add(np.array(self.embeddings))
-        print("Vector database built successfully!")
+        print(f"Total vectors in index: {self.index.ntotal}")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
-
-        # Use embeddings_client
-        # query_embedding = self.embeddings_model.encode([query], show_progress_bar=False)
+        
+        # Get query embedding
         embedding_responses = embeddings_client.post(
             json={"inputs": [query]}, task="feature-extraction"
         )
         query_embedding = json.loads(embedding_responses.decode())
-
-            # Debug prints to help diagnose the issue
+        
+        # Debug print
         print(f"Query embedding shape: {np.array(query_embedding).shape}")
+        
+        # Handle the (1,1,8,768) shape by taking the first embedding
+        query_embedding = np.array(query_embedding)
+        if len(query_embedding.shape) > 2:
+            # Take the first embedding (averaging might be another option)
+            query_embedding = query_embedding[0, 0, 0].reshape(1, -1)
+        
+        print(f"Processed query shape: {query_embedding.shape}")
         print(f"Index dimension: {self.index.d}")
-    
-        # Ensure query_embedding matches index dimensions
-        query_embedding = np.array(query_embedding).reshape(1, self.index.d)
-        D, I = self.index.search(np.array(query_embedding), k)
+        
+        # Verify dimensions
+        assert query_embedding.shape[1] == self.index.d, \
+            f"Query dimension {query_embedding.shape[1]} != Index dimension {self.index.d}"
+        
+        D, I = self.index.search(query_embedding, k)
         results = [self.documents[i]["content"] for i in I[0]]
         return results if results else ["No relevant documents found."]
 
