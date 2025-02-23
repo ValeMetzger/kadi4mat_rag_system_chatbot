@@ -328,8 +328,11 @@ class SimpleRAG:
         self.index.add(np.array(self.embeddings))
         print(f"Total vectors in index: {self.index.ntotal}")
 
-    def search_documents(self, query: str, k: int = 4) -> List[str]:
+    def search_documents(self, query: str, k: int = 4, threshold: float = 1000.0) -> List[str]:
         """Searches for relevant documents using vector similarity."""
+
+            # Preprocess query to extract key terms
+        query = query.strip().lower()
         
         print(f"\nDEBUG: Searching for query: {query}")
         
@@ -354,18 +357,48 @@ class SimpleRAG:
         assert query_embedding.shape[1] == self.index.d, \
             f"Query dimension {query_embedding.shape[1]} != Index dimension {self.index.d}"
         
+        # Search with larger initial k for reranking
+        k_initial = k * 3
         # Search and get results
-        D, I = self.index.search(query_embedding, k)
+        D, I = self.index.search(query_embedding, k_initial)
         
-        print("\nDEBUG: Search Results:")
-        for i, (distance, idx) in enumerate(zip(D[0], I[0])):
+        # Rerank results using multiple criteria
+        results = []
+        for distance, idx in zip(D[0], I[0]):
+            if distance >= threshold:
+                continue
+                
             doc = self.documents[idx]
-            print(f"\nResult {i+1} (distance: {distance:.3f}):")
-            print(f"Metadata: {doc.get('metadata', {})}")
-            print(f"Content preview: {doc['content'][:200]}...")
+            content = doc["content"]
+            
+            # Calculate additional relevance signals
+            exact_match_bonus = sum(term in content.lower() for term in query.split()) * 0.1
+            
+            # Adjust final score
+            adjusted_score = distance - (exact_match_bonus * distance)
+            
+            results.append({
+                "content": content,
+                "score": adjusted_score,
+                "metadata": doc.get("metadata", {}),
+                "source": doc.get("file_name", "Unknown"),
+                "page": doc.get("page", 0)
+            })
         
-        results = [self.documents[i]["content"] for i in I[0]]
-        return results if results else ["No relevant documents found."]
+        # Sort by adjusted score and take top k
+        results.sort(key=lambda x: x["score"])
+        results = results[:k]
+        
+        # Format results with metadata
+        formatted_results = []
+        for result in results:
+            context = f"[Source: {result['source']}"
+            if result['page']:
+                context += f", Page {result['page']}"
+            context += f", Relevance: {1 - result['score']/threshold:.2f}]"
+            formatted_results.append(f"{context}\n{result['content']}")
+        
+        return formatted_results if formatted_results else ["No relevant documents found."]
 
 
 def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
@@ -523,44 +556,47 @@ def preprocess_response(response: str) -> str:
 
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
-    """Get respond from LLMs."""
-
-    # message is the current input query from user
-    # RAG
+    """Get respond from LLMs with improved context handling."""
+    
+    # Get relevant documents for current query
     retrieved_docs = user_session_rag.search_documents(message)
     context = "\n".join(retrieved_docs)
-    system_message = "You are an assistant to help user to answer question related to Kadi based on Relevant documents.\nRelevant documents: {}".format(
-        context
-    )
-    messages = [{"role": "assistant", "content": system_message}]
-
-    # Add history for conversational chat, TODO
-    # for val in history:
-    #     #if val[0]:
-    #     messages.append({"role": "user", "content": val[0]})
-    #     #if val[1]:
-    #     messages.append({"role": "assistant", "content": val[1]})
-
-    messages.append({"role": "user", "content": f"\nQuestion: {message}"})
-
-    # print("-----------------")
-    # print(messages)
-    # print("-----------------")
-    # Get anwser from LLM
+    
+    # Create a focused system message
+    system_message = """You are an assistant helping users with Kadi-related questions. 
+    Base your answers primarily on the provided relevant documents, but maintain conversation coherence.
+    
+    Relevant documents for the current query:
+    {}""".format(context)
+    
+    # Build conversation history with limited context window
+    messages = [{"role": "system", "content": system_message}]
+    
+    # Add recent relevant history (last 3 exchanges)
+    recent_history = history[-3:] if history else []
+    for user_msg, assistant_msg in recent_history:
+        messages.append({"role": "user", "content": user_msg})
+        messages.append({"role": "assistant", "content": assistant_msg})
+    
+    # Add current query
+    messages.append({"role": "user", "content": message})
+    
+    # Get answer from LLM
     response = client.chat_completion(
-        messages, max_tokens=2048, temperature=0.0
-    )  # , top_p=0.9)
-    response_content = "".join(
-        [
-            choice.message["content"]
-            for choice in response.choices
-            if "content" in choice.message
-        ]
+        messages,
+        max_tokens=2048,
+        temperature=0.1,  # Reduced temperature for more focused responses
     )
-
+    
+    response_content = "".join([
+        choice.message["content"]
+        for choice in response.choices
+        if "content" in choice.message
+    ])
+    
     # Process response
     polished_response = preprocess_response(response_content)
-
+    
     history.append((message, polished_response))
     return history, ""
 
