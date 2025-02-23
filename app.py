@@ -882,16 +882,18 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag) -> T
             
         context = "\n\n---\n\n".join(context_parts)
         
+        # Update your prompt template to be cleaner and simpler
+        PROMPT_TEMPLATE = """
+        [INST]
+        Context: {context}
+        Question: {question}
+
+        Please answer the question based on the context provided. If the information is not in the context, say "I don't have enough information to answer that question."
+        [/INST]
+        """
+
         # More focused system message
-        system_message = (
-            "You are a helpful assistant for answering questions about documents. "
-            "Base your response ONLY on the following context documents, separated by '---':\n\n"
-            f"{context}\n\n"
-            "If the context doesn't contain relevant information, respond with: "
-            "'I don't find specific information about that in the available documents.'\n"
-            "Keep your response clear, focused and avoid speculation. "
-            "Do not use markdown formatting or special characters."
-        )
+        system_message = PROMPT_TEMPLATE.format(context=context, question=message)
         
         messages = [{"role": "system", "content": system_message}]
         
