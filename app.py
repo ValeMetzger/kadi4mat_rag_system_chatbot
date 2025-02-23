@@ -170,21 +170,21 @@ def get_llm_response(messages: List[dict], max_retries: int = 3) -> str:
                 elif role == "assistant":
                     formatted_prompt += f"{content} </s>"
             
-            # Use text-generation endpoint with better parameters
+            # Use text-generation endpoint with reduced stop sequences
             response = llm_client.text_generation(
                 formatted_prompt,
-                max_new_tokens=512,  # Reduced to avoid long responses
-                temperature=0.7,  # Increased for more variety
+                max_new_tokens=512,
+                temperature=0.7,
                 top_p=0.9,
                 repetition_penalty=1.2,
                 do_sample=True,
-                stop_sequences=["</s>", "[INST]", "\n\n\n", "User:", "Assistant:"]
+                stop_sequences=["</s>", "[INST]"]  # Reduced stop sequences
             )
             
-            # Clean up response more aggressively
+            # Clean up response
             response_content = response.strip()
-            response_content = response_content.split('[INST]')[0]  # Remove any instruction tags
-            response_content = response_content.split('</s>')[0]  # Remove end tags
+            response_content = response_content.split('[INST]')[0]
+            response_content = response_content.split('</s>')[0]
             response_content = response_content.strip()
             
             # Validate response
@@ -423,6 +423,7 @@ class SimpleRAG:
         self.embedding_dim = 768
         self.documents = []
         self.index = None
+        self.normalize_vectors = True
         self.embeddings_client = InferenceClient(
             "sentence-transformers/all-mpnet-base-v2",
             token=huggingfacehub_api_token
@@ -473,11 +474,9 @@ class SimpleRAG:
             
             for j, doc in enumerate(batch):
                 try:
-                    # Get embedding using feature_extraction
+                    # Remove pooling parameter and use direct feature extraction
                     embedding = self.embeddings_client.feature_extraction(
-                        doc["content"],
-                        pooling="mean",
-                        normalize=True
+                        doc["content"]
                     )
                     batch_embeddings[j] = embedding
                     
@@ -508,12 +507,8 @@ class SimpleRAG:
                 print("Warning: Vector database not initialized")
                 return ["No documents available."]
                 
-            # Get query embedding
-            query_embedding = self.embeddings_client.feature_extraction(
-                query, 
-                pooling="mean", 
-                normalize=True
-            )
+            # Get query embedding without pooling parameter
+            query_embedding = self.embeddings_client.feature_extraction(query)
             
             # Search index
             D, I = self.index.search(
