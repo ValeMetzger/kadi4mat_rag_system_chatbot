@@ -305,13 +305,20 @@ class SimpleRAG:
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
-
-
+        
+        # Get query embedding
         embedding_responses = embeddings_client.post(
             json={"inputs": [query]}, task="feature-extraction"
         )
         query_embedding = json.loads(embedding_responses.decode())
-        D, I = self.index.search(np.array(query_embedding), k)
+        
+        # Reshape the query embedding to match what Faiss expects (2D array)
+        query_embedding = np.array(query_embedding).reshape(1, -1)
+        
+        # Search using Faiss
+        D, I = self.index.search(query_embedding, k)
+        
+        # Get the corresponding documents
         results = [self.documents[i]["content"] for i in I[0]]
         return results if results else ["No relevant documents found."]
 
