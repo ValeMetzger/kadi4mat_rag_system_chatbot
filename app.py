@@ -202,7 +202,7 @@ def get_all_records(user_token):
     response = manager.search.search_resources("record", per_page=100)
     parsed = json.loads(response.content)
 
-    total_pages = parsed["pagination"]["total_pages"]
+    total_pages = parsed["_pagination"]["total_pages"]
 
     def get_page_records(parsed_content):
         item_identifiers = []
@@ -219,12 +219,7 @@ def get_all_records(user_token):
         parsed = json.loads(response.content)
         all_records_identifiers.extend(get_page_records(parsed))
 
-    return gr.Dropdown(
-        choices=all_records_identifiers,
-        interactive=True,
-        label="Record Identifier",
-        info="Select record to get file list",
-    )
+    return all_records_identifiers
 
 
 def _init_user_token(request: gr.Request):
@@ -386,23 +381,12 @@ def prepare_all_files_for_chat(token, progress=gr.Progress()):
     manager = KadiManager(instance=instance, host=host, pat=token)
     
     progress(0.1, desc="Getting all records...")
-    # Get all records first
-    host_api = manager.host if manager.host.endswith("/") else manager.host + "/"
-    endpoint = urljoin(host_api, "records")
+    # Get all records using the search functionality
     response = manager.search.search_resources("record", per_page=100)
     parsed = json.loads(response.content)
     
-    # Get total pages from pagination info
-    total_pages = parsed["pagination"]["total_pages"]
-    
-    # Collect all record identifiers
-    all_records_identifiers = []
-    for page in range(1, total_pages + 1):
-        progress(0.1 + (0.1 * page/total_pages), desc=f"Getting records page {page}/{total_pages}")
-        page_endpoint = endpoint + f"?page={page}&per_page=100"
-        response = manager.make_request(page_endpoint)
-        parsed = json.loads(response.content)
-        all_records_identifiers.extend([item["identifier"] for item in parsed["items"]])
+    # Get all record identifiers from the search results
+    all_records_identifiers = [item["identifier"] for item in parsed["items"]]
     
     progress(0.2, desc="Processing files from records...")
     documents = []
