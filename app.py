@@ -146,32 +146,42 @@ def greet(request: gr.Request):
     return f"Welcome to Kadichat, you're logged in as: {request.username}"
 
 
-def get_files_in_record(record_id, user_token):
+def get_files_in_record(record_id, user_token, top_k=10):
     """Get all file list within one record."""
+
     manager = KadiManager(instance=instance, host=host, pat=user_token)
 
     try:
         record = manager.record(identifier=record_id)
     except kadi_apy.lib.exceptions.KadiAPYInputError as e:
-        print(f"Error accessing record {record_id}: {e}")
-        return []
+        raise gr.Error(e)
 
     file_num = record.get_number_files()
-    if file_num == 0:
-        return []
 
-    per_page = 100
-    page_num = (file_num + per_page - 1) // per_page
+    per_page = 100  # default in kadi
+    not_divisible = file_num % per_page
+    if not_divisible:
+        page_num = file_num // per_page + 1
+    else:
+        page_num = file_num // per_page
 
     file_names = []
-    for p in range(1, page_num + 1):
-        file_names.extend([
-            info["name"] 
-            for info in record.get_filelist(page=p, per_page=per_page).json()["items"]
-        ])
+    for p in range(1, page_num + 1):  # page starts at 1 in kadi
+        file_names.extend(
+            [
+                info["name"]
+                for info in record.get_filelist(page=p, per_page=per_page).json()[
+                    "items"
+                ]
+            ]
+        )
 
+    assert file_num == len(
+        file_names
+    ), "Number of files did not match, please check function get_all_file_names."
+
+    # return file_names[:top_k]
     return file_names
-
 
 def get_all_records(user_token):
     """Get all record list in Kadi."""
@@ -207,12 +217,7 @@ def get_all_records(user_token):
         parsed = json.loads(response.content)
         all_records_identifiers.extend(get_page_records(parsed))
 
-    return gr.Dropdown(
-        choices=all_records_identifiers,
-        interactive=True,
-        label="Record Identifier",
-        info="Select record to get file list",
-    )
+    return all_records_identifiers
 
 
 def _init_user_token(request: gr.Request):
@@ -372,50 +377,38 @@ def load_pdf(file_path):
     return documents
 
 
-def prepare_all_files_for_chat(token, progress=gr.Progress()):
-    """Parse and embed all files from all records."""
-    progress(0, desc="Starting")
-    
-    # Get all records
-    manager = KadiManager(instance=instance, host=host, pat=token)
-    response = manager.search.search_resources("record", per_page=100)
-    parsed = json.loads(response.content)
-    total_pages = parsed["_pagination"]["total_pages"]
-    
-    # Collect all record IDs
-    all_records = []
-    for page in range(1, total_pages + 1):
-        endpoint = f"{manager.host}/api/records?page={page}&per_page=100"
-        response = manager.make_request(endpoint)
-        parsed = json.loads(response.content)
-        all_records.extend([item["identifier"] for item in parsed["items"]])
-    
-    progress(0.2, desc="Loading files from all records...")
-    
-    # Collect all documents
-    documents = []
-    for record_id in all_records:
-        file_names = get_files_in_record(record_id, token)
-        if not file_names:
-            continue
-            
-        record = manager.record(identifier=record_id)
-        for file_name in file_names:
-            file_id = record.get_file_id(file_name)
-            with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-                temp_file_location = os.path.join(temp_dir, file_name)
-                record.download_file(file_id, temp_file_location)
-                docs = load_and_chunk_pdf(temp_file_location)
-                documents.extend(docs)
+def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
+    """Parse file and prepare RAG."""
 
-    progress(0.8, desc="Building vector database...")
+    if not file_names:
+        raise gr.Error("No file selected")
+    progress(0, desc="Starting")
+    # Create connection to kadi
+    manager = KadiManager(instance=instance, host=host, pat=token)
+    record = manager.record(identifier=record_id)
+    progress(0.2, desc="Loading files...")
+    # Parse files
+    documents = []
+    # Download
+    for file_name in file_names:
+        file_id = record.get_file_id(file_name)
+        with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+            print(temp_dir)
+            temp_file_location = os.path.join(temp_dir, file_name)
+            record.download_file(file_id, temp_file_location)
+            # parse document
+            docs = load_and_chunk_pdf(temp_file_location)
+            documents.extend(docs)
+
+    progress(0.4, desc="Embedding documents...")
     user_rag = SimpleRAG()
     user_rag.documents = documents
     user_rag.embeddings_model = embeddings_model
     user_rag.build_vector_db()
-    
-    progress(1, desc="Ready to chat")
-    return "Vector database ready with all files", user_rag
+    # print(documents[:2])
+    print("user rag created")
+    progress(1, desc="ready to chat")
+    return "ready to chat", user_rag
 
 
 def preprocess_response(response: str) -> str:
@@ -499,17 +492,36 @@ with gr.Blocks() as main_demo:
         with gr.Row():
             with gr.Column(scale=7):
                 chatbot = gr.Chatbot()
+
+
             with gr.Column(scale=3):
+                record_list = []
+
                 load_files_btn = gr.Button("Load All Files")
                 message_box = gr.Textbox(label="", value="Click 'Load All Files' to start", interactive=False)
                 
                 # Initialize user token and prepare RAG system
-                main_demo.load(_init_user_token, None, _state_user_token)
+                main_demo.load(_init_user_token, None, _state_user_token).then(
+                    get_all_records, _state_user_token, record_list
+                )
+
+                record_list.select(
+                    fn=get_files_in_record,
+                    inputs=[record_list, _state_user_token]
+                )
+
                 load_files_btn.click(
-                    fn=prepare_all_files_for_chat,
+                    fn=prepare_file_for_chat,
                     inputs=[_state_user_token],
                     outputs=[message_box, user_session_rag],
                 )
+                load_files_btn.click(
+                    fn=prepare_file_for_chat,
+                    inputs=[record_list, record_file_dropdown, _state_user_token],
+                    outputs=[message_box, user_session_rag],
+                )
+
+
 
         with gr.Row():
             txt_input = gr.Textbox(
