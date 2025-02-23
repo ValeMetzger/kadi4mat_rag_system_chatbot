@@ -306,21 +306,27 @@ class SimpleRAG:
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
         
-        # Get query embedding
-        embedding_responses = embeddings_client.post(
-            json={"inputs": [query]}, task="feature-extraction"
-        )
-        query_embedding = json.loads(embedding_responses.decode())
-        
-        # Reshape the query embedding to match what Faiss expects (2D array)
-        query_embedding = np.array(query_embedding).reshape(1, -1)
-        
-        # Search using Faiss
-        D, I = self.index.search(query_embedding, k)
-        
-        # Get the corresponding documents
-        results = [self.documents[i]["content"] for i in I[0]]
-        return results if results else ["No relevant documents found."]
+        try:
+            # Get query embedding using the same model as used for document embeddings
+            query_embedding = self.embeddings_model.encode([query])[0]  # Get first element as it's a single query
+            
+            # Reshape the query embedding to match what Faiss expects (2D array)
+            query_embedding = query_embedding.reshape(1, -1)
+            
+            # Ensure dimensions match
+            if query_embedding.shape[1] != self.index.d:
+                raise ValueError(f"Query embedding dimension ({query_embedding.shape[1]}) does not match index dimension ({self.index.d})")
+            
+            # Search using Faiss
+            D, I = self.index.search(query_embedding, k)
+            
+            # Get the corresponding documents
+            results = [self.documents[i]["content"] for i in I[0]]
+            return results if results else ["No relevant documents found."]
+            
+        except Exception as e:
+            print(f"Search error: {str(e)}")
+            return ["Error during search: Please try again."]
 
 
 def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
