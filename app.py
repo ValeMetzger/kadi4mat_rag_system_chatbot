@@ -151,29 +151,21 @@ def greet(request: gr.Request):
 
 def get_files_in_record(all_records_identifiers, user_token):
     """Get all file lists from all records."""
-    print(f"Starting get_files_in_record with {len(all_records_identifiers)} records")  # Debug print
+    print(f"Starting get_files_in_record with {len(all_records_identifiers)} records")
     
     if not all_records_identifiers:
-        print("No records provided")  # Debug print
+        print("No records provided")
         return []
         
-    manager = KadiManager(instance=instance, host=host, pat=user_token)
+    manager = KadiManager(instance=instance, host=host, token=user_token)  # Changed pat to token
     all_file_names = []
 
     for record_id in all_records_identifiers:
         try:
             record = manager.record(identifier=record_id)
-            file_num = record.get_number_files()
-
-            per_page = 100  # default in kadi
-            not_divisible = file_num % per_page
-            page_num = (file_num // per_page + 1) if not_divisible else (file_num // per_page)
-
-            for p in range(1, page_num + 1):  # page starts at 1 in kadi
-                file_names = [
-                    info["name"]
-                    for info in record.get_filelist(page=p, per_page=per_page).json()["items"]
-                ]
+            files = record.get_filelist()  # Simplified file retrieval
+            if files and files.json().get("items"):
+                file_names = [info["name"] for info in files.json()["items"]]
                 all_file_names.extend(file_names)
 
         except kadi_apy.lib.exceptions.KadiAPYInputError as e:
@@ -543,57 +535,42 @@ def process_file(file_path):
 
 def prepare_file_for_chat(all_records_identifiers, all_file_names, token, progress=gr.Progress()):
     """Parse file and prepare RAG."""
-    print(f"\nPreparing chat system with {len(all_file_names)} files from {len(all_records_identifiers)} records")
+    print(f"\nPreparing chat system with {len(all_records_identifiers)} records")
     
-    if not all_file_names:
-        raise gr.Error("No files found")
+    if not all_records_identifiers:
+        raise gr.Error("No records found")
     progress(0, desc="Starting")
     
-    # Create connection to kadi
-    manager = KadiManager(instance=instance, host=host, pat=token)
+    manager = KadiManager(instance=instance, host=host, token=token)  # Changed pat to token
     documents = []
     
-    total_files = len(all_file_names)
-    files_processed = 0
-    successful_files = 0
-    
-    # Iterate through all records
     for record_id in all_records_identifiers:
         try:
             record = manager.record(identifier=record_id)
+            files = record.get_filelist()
             
-            # Get all files for this record
-            record_files = record.get_filelist().json()["items"]
-            
-            # Process each file in this record
-            for file_info in record_files:
-                file_name = file_info["name"]
-                if file_name in all_file_names:  # Only process files we want
-                    progress(0.2 + (0.6 * files_processed/total_files), 
-                            desc=f"Processing {file_name}...")
+            if not files or not files.json().get("items"):
+                continue
+                
+            for file_info in files.json()["items"]:
+                progress(0.2, desc=f"Processing {file_info['name']}...")
+                
+                with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+                    temp_file_location = os.path.join(temp_dir, file_info["name"])
+                    record.download_file(file_info["id"], temp_file_location)
                     
-                    file_id = file_info["id"]
-                    with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-                        temp_file_location = os.path.join(temp_dir, file_name)
-                        record.download_file(file_id, temp_file_location)
-                        
-                        # Parse document
-                        try:
-                            docs = process_file(temp_file_location)
-                            # Add source information to each chunk
-                            for doc in docs:
-                                doc["metadata"].update({
-                                    "file_name": file_name,
-                                    "record_id": record_id
-                                })
-                            documents.extend(docs)
-                            successful_files += 1
-                        except Exception as e:
-                            print(f"Error processing file {file_name}: {e}")
-                            continue
-                            
-                    files_processed += 1
-                    
+                    try:
+                        docs = process_file(temp_file_location)
+                        for doc in docs:
+                            doc["metadata"].update({
+                                "file_name": file_info["name"],
+                                "record_id": record_id
+                            })
+                        documents.extend(docs)
+                    except Exception as e:
+                        print(f"Error processing file {file_info['name']}: {e}")
+                        continue
+
         except kadi_apy.lib.exceptions.KadiAPYInputError as e:
             print(f"Error accessing record {record_id}: {e}")
             continue
@@ -604,7 +581,6 @@ def prepare_file_for_chat(all_records_identifiers, all_file_names, token, progre
     progress(0.8, desc="Building vector database...")
     user_rag = SimpleRAG()
     user_rag.documents = documents
-    user_rag.embeddings_model = embeddings_model
     user_rag.build_vector_db()
     
     progress(1, desc="Ready to chat")
