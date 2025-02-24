@@ -507,9 +507,9 @@ with gr.Blocks() as main_demo:
                     label="", value="Click 'Get All Files' to start", interactive=False
                 )
 
-                # Hidden components needed for the workflow
-                record_list = []
-                record_file_dropdown = []
+                # Change these from lists to Gradio components
+                record_list = gr.State([])  # Using gr.State to store the records
+                record_file_dropdown = gr.State([])  # Using gr.State to store the files
 
                 # Initialize user token and get records list
                 main_demo.load(_init_user_token, None, _state_user_token)
