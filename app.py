@@ -19,6 +19,8 @@ from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 from sentence_transformers import CrossEncoder
+from docx import Document
+import markdown
 
 # Kadi OAuth settings
 load_dotenv()
@@ -455,6 +457,87 @@ def load_pdf(file_path):
     return documents
 
 
+def load_text_file(file_path):
+    """Extracts text from a plain text file."""
+    print(f"\nDEBUG: Processing text file: {file_path}")
+    
+    with open(file_path, 'r', encoding='utf-8') as file:
+        text = file.read()
+        
+    chunks = chunk_text(text)
+    documents = []
+    for i, chunk in enumerate(chunks):
+        documents.append({
+            "content": chunk,
+            "metadata": {"file_type": "text", "chunk_id": i}
+        })
+    
+    return documents
+
+
+def load_markdown_file(file_path):
+    """Extracts text from a markdown file."""
+    print(f"\nDEBUG: Processing markdown file: {file_path}")
+    
+    with open(file_path, 'r', encoding='utf-8') as file:
+        md_text = file.read()
+        # Convert markdown to plain text
+        html = markdown.markdown(md_text)
+        # Simple HTML tag removal (you might want to use a proper HTML parser for better results)
+        text = html.replace('<p>', '\n\n').replace('</p>', '').replace('<br>', '\n')
+        
+    chunks = chunk_text(text)
+    documents = []
+    for i, chunk in enumerate(chunks):
+        documents.append({
+            "content": chunk,
+            "metadata": {"file_type": "markdown", "chunk_id": i}
+        })
+    
+    return documents
+
+
+def load_docx(file_path):
+    """Extracts text from a Word document."""
+    print(f"\nDEBUG: Processing Word document: {file_path}")
+    
+    doc = Document(file_path)
+    text = '\n\n'.join([paragraph.text for paragraph in doc.paragraphs])
+    
+    chunks = chunk_text(text)
+    documents = []
+    for i, chunk in enumerate(chunks):
+        documents.append({
+            "content": chunk,
+            "metadata": {"file_type": "docx", "chunk_id": i}
+        })
+    
+    return documents
+
+
+def process_file(file_path):
+    """Process a file based on its extension."""
+    file_extension = file_path.lower().split('.')[-1]
+    
+    processors = {
+        'pdf': load_and_chunk_pdf,
+        'txt': load_text_file,
+        'md': load_markdown_file,
+        'docx': load_docx
+    }
+    
+    processor = processors.get(file_extension)
+    if processor is None:
+        print(f"Unsupported file type: {file_extension}")
+        return []
+        
+    try:
+        return processor(file_path)
+    except Exception as e:
+        print(f"Error processing file {file_path}: {e}")
+        return []
+
+
 def prepare_file_for_chat(all_records_identifiers, all_file_names, token, progress=gr.Progress()):
     """Parse file and prepare RAG."""
 
@@ -491,7 +574,7 @@ def prepare_file_for_chat(all_records_identifiers, all_file_names, token, progre
                         
                         # Parse document
                         try:
-                            docs = load_and_chunk_pdf(temp_file_location)
+                            docs = process_file(temp_file_location)
                             # Add source information to each chunk
                             for doc in docs:
                                 doc["metadata"].update({
