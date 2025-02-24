@@ -627,54 +627,29 @@ def preprocess_response(response: str) -> str:
 
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
-    """Enhanced response generation with better prompting."""
-    
-    print(f"\nProcessing query: '{message[:50]}...'")
-    
+    """Enhanced response generation with simpler prompting."""
     # Get relevant documents
-    retrieved_docs = user_session_rag.search_documents(message)
-    context = "\n".join(retrieved_docs)
+    retrieved_docs = user_session_rag.search_documents(message, k=4)
+    context = "\n\n".join(retrieved_docs)
     
-    # Calculate approximate token count (rough estimation)
-    token_estimate = len(context.split()) + len(message.split())
-    print(f"Context size: {len(retrieved_docs)} documents, ~{token_estimate} tokens")
+    # Simple, focused prompt
+    system_message = """You are a helpful assistant that answers questions based on the provided documents.
+    Use only the information from the documents to answer questions.
+    If you cannot find relevant information, say so clearly.
     
-    if token_estimate > 2000:
-        print("Truncating context due to length")
-        context = "\n".join(retrieved_docs[:3])
+    Context:
+    {}""".format(context)
     
-    # Enhanced prompt template
-    system_message = """You are an expert assistant specializing Scientific related information. 
-    Your task is to provide accurate, helpful answers based primarily on the provided context.
-    If the context doesn't contain enough information to fully answer the question, acknowledge this 
-    and provide the best possible answer with the available information.
-
-    Retrieved Context:
-    {}
-
-    Guidelines:
-    - Base your answer primarily on the provided context
-    - Cite specific sources when possible
-    - If information is missing or unclear, be transparent about it
-    - Maintain a professional and helpful tone""".format(context)
-
-    # Build conversation history with limited context window
-    messages = [{"role": "system", "content": system_message}]
+    messages = [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": message}
+    ]
     
-    # Add recent relevant history (last 3 exchanges)
-    recent_history = history[-3:] if history else []
-    for user_msg, assistant_msg in recent_history:
-        messages.append({"role": "user", "content": user_msg})
-        messages.append({"role": "assistant", "content": assistant_msg})
-    
-    # Add current query
-    messages.append({"role": "user", "content": message})
-    
-    # Get answer from LLM
+    # Get response with zero temperature for consistency
     response = client.chat_completion(
         messages,
         max_tokens=2048,
-        temperature=0.1,  # Reduced temperature for more focused responses
+        temperature=0.0
     )
     
     response_content = "".join([
@@ -683,10 +658,7 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
         if "content" in choice.message
     ])
     
-    # Process response
-    polished_response = preprocess_response(response_content)
-    
-    history.append((message, polished_response))
+    history.append((message, response_content))
     return history, ""
 
 
