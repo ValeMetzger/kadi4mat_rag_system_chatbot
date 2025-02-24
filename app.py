@@ -283,13 +283,12 @@ with gr.Blocks() as login_demo:
 # A simple RAG implementation
 class SimpleRAG:
     def __init__(self) -> None:
-        print("\n=== Initializing SimpleRAG ===")
         self.documents = []
         self.embeddings_model = None
         self.embeddings = None
         self.index = None
+        # Initialize cross-encoder for re-ranking
         self.cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
-        print("SimpleRAG initialized successfully")
 
     def load_pdf(self, file_path: str) -> None:
         """Extracts text from a PDF file and stores it in the property documents by page."""
@@ -304,23 +303,18 @@ class SimpleRAG:
 
     def build_vector_db(self) -> None:
         """Builds a vector database with improved indexing."""
-        print("\n=== Building Vector Database ===")
-        print(f"Number of documents to process: {len(self.documents)}")
-        
         if self.embeddings_model is None:
-            print("Initializing embedding model: hkunlp/instructor-xl")
+            # Using a more powerful embedding model
             self.embeddings_model = SentenceTransformer(
                 "hkunlp/instructor-xl",
                 trust_remote_code=True
             )
 
-        # Create FAISS index
-        dimension = 768
-        print(f"Creating FAISS index with dimension: {dimension}")
+        # Create FAISS index with metadata support
+        dimension = 768  # adjust based on model
         self.index = faiss.IndexFlatL2(dimension)
         
         # Add metadata storage
-        print("Processing document metadata")
         self.metadata = []
         for doc in self.documents:
             self.metadata.append({
@@ -329,37 +323,27 @@ class SimpleRAG:
                 'chunk_id': doc.get('metadata', {}).get('chunk_id', 0)
             })
 
-        # Get embeddings
-        print("Generating embeddings...")
+        # Get embeddings with instruction
         instruction = "Represent the text for retrieving relevant scientific document passages:"
         texts = [instruction + doc["content"] for doc in self.documents]
         self.embeddings = self.embeddings_model.encode(texts, show_progress_bar=True)
         
-        print(f"Adding {len(self.embeddings)} embeddings to index")
         self.index.add(np.array(self.embeddings))
-        print("Vector database built successfully")
 
     def search_documents(self, query: str, k: int = 8, threshold: float = 1000.0) -> List[str]:
         """Enhanced search with re-ranking and hybrid retrieval."""
-        print(f"\n=== Searching Documents for Query: {query} ===")
         
         # Hybrid search preparation
         query_terms = set(query.lower().split())
-        print(f"Query terms: {query_terms}")
         
-        # Get initial candidates
-        print("Generating query embedding...")
+        # Get initial candidates through vector similarity
         instruction = "Represent the question for retrieving relevant scientific document passages:"
         query_embedding = self.embeddings_model.encode([instruction + query])
-        
-        print(f"Searching index for top {k*2} candidates...")
-        D, I = self.index.search(query_embedding, k * 2)
+        D, I = self.index.search(query_embedding, k * 2)  # Get more candidates for re-ranking
         
         candidates = []
-        print("\n=== Processing Search Results ===")
         for distance, idx in zip(D[0], I[0]):
             if distance >= threshold:
-                print(f"Skipping document {idx} (distance {distance:.2f} >= threshold {threshold})")
                 continue
                 
             doc = self.documents[idx]
@@ -370,11 +354,6 @@ class SimpleRAG:
             term_overlap = len(query_terms.intersection(set(content.lower().split())))
             hybrid_score = distance * (1.0 - (term_overlap * 0.1))
             
-            print(f"\nDocument {idx}:")
-            print(f"Distance: {distance:.2f}")
-            print(f"Term overlap: {term_overlap}")
-            print(f"Hybrid score: {hybrid_score:.2f}")
-            
             candidates.append({
                 'content': content,
                 'distance': distance,
@@ -384,14 +363,12 @@ class SimpleRAG:
         
         # Re-rank using cross-encoder
         if candidates:
-            print("\n=== Re-ranking Candidates ===")
             pairs = [(query, doc['content']) for doc in candidates]
             cross_scores = self.cross_encoder.predict(pairs)
             
             # Combine scores
             for idx, doc in enumerate(candidates):
                 doc['final_score'] = (doc['hybrid_score'] + cross_scores[idx]) / 2
-                print(f"Document {idx} final score: {doc['final_score']:.2f}")
             
             # Sort and select top k
             candidates.sort(key=lambda x: x['final_score'])
@@ -399,15 +376,12 @@ class SimpleRAG:
         
         # Format results
         results = []
-        print("\n=== Final Results ===")
-        for i, doc in enumerate(candidates):
+        for doc in candidates:
             metadata = doc['metadata']
             context = f"[Source: {metadata['file_name']}, Record: {metadata['record_id']}, "
             context += f"Relevance: {1 - doc['final_score']/threshold:.2f}]"
             results.append(f"{context}\n{doc['content']}")
-            print(f"Result {i+1} metadata: {context}")
         
-        print(f"Returning {len(results)} results")
         return results if results else ["No relevant documents found."]
 
 
@@ -541,90 +515,33 @@ def load_docx(file_path):
     return documents
 
 
-def process_file(file_path: str) -> List[str]:
-    """Process a single document file and generate chunks."""
-    file_type = file_path.split('.')[-1].lower()
-    chunks = []
+def process_file(file_path):
+    """Process a file based on its extension."""
+    file_extension = file_path.lower().split('.')[-1]
     
-    print(f"\nProcessing file: {file_path} of type {file_type}")
+    processors = {
+        'pdf': load_and_chunk_pdf,
+        'txt': load_text_file,
+        'md': load_markdown_file,
+        'docx': load_docx
+    }
     
-    try:
-        if file_type == "pdf":
-            doc = pymupdf.open(file_path)
-            text = ""
-            print(f"PDF pages: {doc.page_count}")
-            for page in doc:
-                page_text = page.get_text()
-                print(f"Page text length: {len(page_text)}")
-                text += page_text
-                
-        elif file_type == "docx":
-            doc = Document(file_path)
-            text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
-            print(f"DOCX text length: {len(text)}")
-            
-        elif file_type in ["txt", "md"]:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                text = f.read()
-                print(f"{file_type.upper()} text length: {len(text)}")
-                
-        else:
-            print(f"Skipping unsupported file type: {file_type}")
-            return []
-
-        # Only process if we have meaningful text
-        if len(text.strip()) > 0:
-            chunks = create_chunks(text)
-            print(f"Generated {len(chunks)} chunks from text of length {len(text)}")
-        else:
-            print("No text content found in file")
-            
-    except Exception as e:
-        print(f"Error processing file {file_path}: {str(e)}")
+    processor = processors.get(file_extension)
+    if processor is None:
+        print(f"Unsupported file type: {file_extension}")
         return []
         
-    return chunks
-
-def create_chunks(text: str, max_chunk_size: int = 1000, overlap: int = 100) -> List[str]:
-    """Create overlapping chunks from text."""
-    chunks = []
-    start = 0
-    text_length = len(text)
-    
-    print(f"Creating chunks from text of length {text_length}")
-    print(f"Using max_chunk_size={max_chunk_size}, overlap={overlap}")
-    
-    while start < text_length:
-        end = start + max_chunk_size
-        if end > text_length:
-            end = text_length
-        
-        # Adjust end to avoid breaking sentences
-        if end < text_length:
-            # Look for sentence boundaries (., !, ?)
-            for i in range(end, start, -1):
-                if text[i-1] in '.!?' and (i == text_length or text[i].isspace()):
-                    end = i
-                    break
-                    
-        chunk = text[start:end].strip()
-        if chunk:  # Only add non-empty chunks
-            chunks.append(chunk)
-            print(f"Created chunk of length {len(chunk)}")
-            
-        start = end - overlap
-        
-    return chunks
+    try:
+        return processor(file_path)
+    except Exception as e:
+        print(f"Error processing file {file_path}: {e}")
+        return []
 
 
 def prepare_file_for_chat(all_records_identifiers, all_file_names, token, progress=gr.Progress()):
     """Parse file and prepare RAG."""
-    print("\n=== Starting prepare_file_for_chat ===")
-    print(f"Number of records: {len(all_records_identifiers)}")
-    print(f"Number of files: {len(all_file_names)}")
 
     if not all_file_names:
-        print("ERROR: No files found")
         raise gr.Error("No files found")
     progress(0, desc="Starting")
     
@@ -635,22 +552,18 @@ def prepare_file_for_chat(all_records_identifiers, all_file_names, token, progre
     total_files = len(all_file_names)
     files_processed = 0
     
-    print("\n=== Processing Records and Files ===")
     # Iterate through all records
     for record_id in all_records_identifiers:
         try:
-            print(f"\nProcessing record: {record_id}")
             record = manager.record(identifier=record_id)
             
             # Get all files for this record
             record_files = record.get_filelist().json()["items"]
-            print(f"Found {len(record_files)} files in record")
             
             # Process each file in this record
             for file_info in record_files:
                 file_name = file_info["name"]
                 if file_name in all_file_names:  # Only process files we want
-                    print(f"\nProcessing file: {file_name}")
                     progress(0.2 + (0.6 * files_processed/total_files), 
                             desc=f"Processing {file_name}...")
                     
@@ -658,12 +571,10 @@ def prepare_file_for_chat(all_records_identifiers, all_file_names, token, progre
                     with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
                         temp_file_location = os.path.join(temp_dir, file_name)
                         record.download_file(file_id, temp_file_location)
-                        print(f"Downloaded file to: {temp_file_location}")
                         
                         # Parse document
                         try:
                             docs = process_file(temp_file_location)
-                            print(f"Successfully processed file. Generated {len(docs)} chunks")
                             # Add source information to each chunk
                             for doc in docs:
                                 doc["metadata"].update({
@@ -672,30 +583,24 @@ def prepare_file_for_chat(all_records_identifiers, all_file_names, token, progre
                                 })
                             documents.extend(docs)
                         except Exception as e:
-                            print(f"ERROR processing file {file_name}: {str(e)}")
+                            print(f"Error processing file {file_name}: {e}")
                             continue
                             
                     files_processed += 1
-                    print(f"Total files processed: {files_processed}/{total_files}")
                     
         except kadi_apy.lib.exceptions.KadiAPYInputError as e:
-            print(f"ERROR accessing record {record_id}: {str(e)}")
+            print(f"Error accessing record {record_id}: {e}")
             continue
 
-    print(f"\n=== Document Processing Summary ===")
-    print(f"Total documents processed: {len(documents)}")
     if not documents:
-        print("ERROR: No documents were successfully processed")
         raise gr.Error("No documents were successfully processed")
 
-    print("\n=== Building Vector Database ===")
     progress(0.8, desc="Building vector database...")
     user_rag = SimpleRAG()
     user_rag.documents = documents
     user_rag.embeddings_model = embeddings_model
     user_rag.build_vector_db()
     
-    print(f"Vector database built successfully with {len(documents)} documents")
     progress(1, desc="Ready to chat")
     return "Ready to chat", user_rag
 
@@ -717,45 +622,49 @@ def preprocess_response(response: str) -> str:
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     """Enhanced response generation with better prompting."""
-    print("\n=== Starting New Response Generation ===")
-    print(f"User message: {message}")
     
     # Get relevant documents
-    print("\n=== Retrieving Relevant Documents ===")
     retrieved_docs = user_session_rag.search_documents(message)
-    print(f"Retrieved {len(retrieved_docs)} documents")
-    
-    # Print detailed information about retrieved documents
-    for i, doc in enumerate(retrieved_docs):
-        print(f"\nDocument {i+1}:")
-        # Extract metadata if present
-        metadata_start = doc.find("[Source:")
-        metadata_end = doc.find("]", metadata_start) + 1 if metadata_start != -1 else 0
-        metadata = doc[metadata_start:metadata_end] if metadata_start != -1 else "No metadata"
-        print(f"Metadata: {metadata}")
-        print(f"Content preview: {doc[metadata_end:metadata_end+200]}...")
-    
     context = "\n".join(retrieved_docs)
-    print(f"\nTotal context length: {len(context)} characters")
     
-    # Enhanced system message with stronger instruction
-    system_message = """You are an expert assistant. You MUST use the provided context to answer questions.
-    If you cannot find relevant information in the context, say so explicitly.
+    # Calculate approximate token count (rough estimation)
+    token_estimate = len(context.split()) + len(message.split())
+    if token_estimate > 2000:  # Adjust based on your model's limits
+        # Truncate context while keeping most relevant parts
+        context = "\n".join(retrieved_docs[:3])
     
-    Context:
-    {}
-    
-    Use the above context to answer the following question. If you cannot find relevant information
-    in the context, acknowledge this fact.""".format(context)
+    # Enhanced prompt template
+    system_message = """You are an expert assistant specializing Scientific related information. 
+    Your task is to provide accurate, helpful answers based primarily on the provided context.
+    If the context doesn't contain enough information to fully answer the question, acknowledge this 
+    and provide the best possible answer with the available information.
 
+    Retrieved Context:
+    {}
+
+    Guidelines:
+    - Base your answer primarily on the provided context
+    - Cite specific sources when possible
+    - If information is missing or unclear, be transparent about it
+    - Maintain a professional and helpful tone""".format(context)
+
+    # Build conversation history with limited context window
     messages = [{"role": "system", "content": system_message}]
+    
+    # Add recent relevant history (last 3 exchanges)
+    recent_history = history[-3:] if history else []
+    for user_msg, assistant_msg in recent_history:
+        messages.append({"role": "user", "content": user_msg})
+        messages.append({"role": "assistant", "content": assistant_msg})
+    
+    # Add current query
     messages.append({"role": "user", "content": message})
     
-    print("\n=== Generating Response ===")
+    # Get answer from LLM
     response = client.chat_completion(
         messages,
         max_tokens=2048,
-        temperature=0.1,
+        temperature=0.1,  # Reduced temperature for more focused responses
     )
     
     response_content = "".join([
@@ -764,11 +673,10 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
         if "content" in choice.message
     ])
     
-    print("\n=== Response Summary ===")
-    print(f"Response length: {len(response_content)} characters")
-    print(f"Response preview: {response_content[:200]}...")
+    # Process response
+    polished_response = preprocess_response(response_content)
     
-    history.append((message, response_content))
+    history.append((message, polished_response))
     return history, ""
 
 
