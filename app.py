@@ -542,7 +542,9 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     
     # Add a disclaimer if topic seems to change dramatically
     if history and is_topic_change(message, history[-1][0]):
-        return history, "Notice: It seems like you're changing topics. For best results, please use the 'Refresh Chat' button when starting a new topic.\n\n" + response
+        notice = "Notice: It seems like you're changing topics. For best results, please use the 'Refresh Chat' button when starting a new topic."
+        history.append((message, notice))
+        return history, ""
     
     # Get relevant documents
     retrieved_docs = user_session_rag.search_documents(message)
