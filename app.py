@@ -485,10 +485,6 @@ with gr.Blocks() as main_demo:
 
                 # Initialize user token and get records list
                 main_demo.load(
-                    fn=lambda: None,  # Initialize
-                    outputs=[_state_user_token, record_list],
-                    _js="() => [null, []]"
-                ).then(
                     fn=_init_user_token,
                     outputs=_state_user_token
                 ).then(
