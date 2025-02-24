@@ -301,32 +301,22 @@ class SimpleRAG:
         # print("PDF processed successfully!")
 
     def build_vector_db(self) -> None:
-        """Builds a vector database with improved indexing."""
+        """Builds a vector database using the content of the PDF."""
         if self.embeddings_model is None:
-            # Using a more powerful embedding model
             self.embeddings_model = SentenceTransformer(
-                "hkunlp/instructor-xl",
+                "sentence-transformers/all-mpnet-base-v2", 
                 trust_remote_code=True
             )
 
-        # Create FAISS index with metadata support
-        dimension = 768  # adjust based on model
+        # Get embeddings (simpler approach)
+        self.embeddings = self.embeddings_model.encode(
+            [doc["content"] for doc in self.documents], 
+            show_progress_bar=True
+        )
+        
+        # Create FAISS index
+        dimension = self.embeddings.shape[1]
         self.index = faiss.IndexFlatL2(dimension)
-        
-        # Add metadata storage
-        self.metadata = []
-        for doc in self.documents:
-            self.metadata.append({
-                'file_name': doc.get('metadata', {}).get('file_name', ''),
-                'record_id': doc.get('metadata', {}).get('record_id', ''),
-                'chunk_id': doc.get('metadata', {}).get('chunk_id', 0)
-            })
-
-        # Get embeddings with instruction
-        instruction = "Represent the text for retrieving relevant scientific document passages:"
-        texts = [instruction + doc["content"] for doc in self.documents]
-        self.embeddings = self.embeddings_model.encode(texts, show_progress_bar=True)
-        
         self.index.add(np.array(self.embeddings))
 
     def search_documents(self, query: str, k: int = 8, threshold: float = 1000.0) -> List[str]:
@@ -607,25 +597,19 @@ def preprocess_response(response: str) -> str:
 
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
-    """Enhanced response generation with simpler prompting."""
+    """Get respond from LLMs."""
     # Get relevant documents
-    retrieved_docs = user_session_rag.search_documents(message, k=4)
-    context = "\n\n".join(retrieved_docs)
+    retrieved_docs = user_session_rag.search_documents(message)
+    context = "\n".join(retrieved_docs)
     
-    # Simple, focused prompt
-    system_message = """You are a helpful assistant that answers questions based on the provided documents.
-    Use only the information from the documents to answer questions.
-    If you cannot find relevant information, say so clearly.
-    
-    Context:
-    {}""".format(context)
+    system_message = """You are an assistant to help user to answer question related to Kadi based on Relevant documents.
+    Relevant documents: {}""".format(context)
     
     messages = [
-        {"role": "system", "content": system_message},
-        {"role": "user", "content": message}
+        {"role": "assistant", "content": system_message},
+        {"role": "user", "content": f"\nQuestion: {message}"}
     ]
-    
-    # Get response with zero temperature for consistency
+
     response = client.chat_completion(
         messages,
         max_tokens=2048,
@@ -637,7 +621,7 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
         for choice in response.choices
         if "content" in choice.message
     ])
-    
+
     history.append((message, response_content))
     return history, ""
 
