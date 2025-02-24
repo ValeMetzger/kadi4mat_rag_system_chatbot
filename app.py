@@ -689,10 +689,13 @@ with gr.Blocks() as main_demo:
                     label="", value="progress bar", interactive=False
                 )
                 
-                # Simplified click handler
+                # Create a hidden textbox for file_names parameter
+                file_names = gr.Textbox(visible=False, value="[]")
+                
+                # Modified click handler
                 parse_files.click(
                     fn=prepare_file_for_chat,
-                    inputs=[record_list, None, _state_user_token],  # Pass None for file_names
+                    inputs=[record_list, file_names, _state_user_token],
                     outputs=[message_box, user_session_rag],
                 )
 
