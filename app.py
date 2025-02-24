@@ -332,6 +332,7 @@ class SimpleRAG:
 
     def search_documents(self, query: str, k: int = 8, threshold: float = 1000.0) -> List[str]:
         """Enhanced search with re-ranking and hybrid retrieval."""
+        print(f"Searching for query: '{query[:50]}...' with k={k}")
         
         # Hybrid search preparation
         query_terms = set(query.lower().split())
@@ -340,6 +341,8 @@ class SimpleRAG:
         instruction = "Represent the question for retrieving relevant scientific document passages:"
         query_embedding = self.embeddings_model.encode([instruction + query])
         D, I = self.index.search(query_embedding, k * 2)  # Get more candidates for re-ranking
+        
+        print(f"Found {len(I[0])} initial candidates")
         
         candidates = []
         for distance, idx in zip(D[0], I[0]):
@@ -540,7 +543,8 @@ def process_file(file_path):
 
 def prepare_file_for_chat(all_records_identifiers, all_file_names, token, progress=gr.Progress()):
     """Parse file and prepare RAG."""
-
+    print(f"\nPreparing chat system with {len(all_file_names)} files from {len(all_records_identifiers)} records")
+    
     if not all_file_names:
         raise gr.Error("No files found")
     progress(0, desc="Starting")
@@ -551,6 +555,7 @@ def prepare_file_for_chat(all_records_identifiers, all_file_names, token, progre
     
     total_files = len(all_file_names)
     files_processed = 0
+    successful_files = 0
     
     # Iterate through all records
     for record_id in all_records_identifiers:
@@ -582,6 +587,7 @@ def prepare_file_for_chat(all_records_identifiers, all_file_names, token, progre
                                     "record_id": record_id
                                 })
                             documents.extend(docs)
+                            successful_files += 1
                         except Exception as e:
                             print(f"Error processing file {file_name}: {e}")
                             continue
@@ -623,14 +629,18 @@ def preprocess_response(response: str) -> str:
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     """Enhanced response generation with better prompting."""
     
+    print(f"\nProcessing query: '{message[:50]}...'")
+    
     # Get relevant documents
     retrieved_docs = user_session_rag.search_documents(message)
     context = "\n".join(retrieved_docs)
     
     # Calculate approximate token count (rough estimation)
     token_estimate = len(context.split()) + len(message.split())
-    if token_estimate > 2000:  # Adjust based on your model's limits
-        # Truncate context while keeping most relevant parts
+    print(f"Context size: {len(retrieved_docs)} documents, ~{token_estimate} tokens")
+    
+    if token_estimate > 2000:
+        print("Truncating context due to length")
         context = "\n".join(retrieved_docs[:3])
     
     # Enhanced prompt template
