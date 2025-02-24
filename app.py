@@ -394,21 +394,31 @@ def prepare_file_for_chat(all_records_identifiers, file_names, token, progress=g
     total_records = len(all_records_identifiers)
     total_files = len(file_names)
     
-    for idx, record_id in enumerate(all_records_identifiers):
-        progress(0.1 * idx/total_records, desc=f"Processing record {idx + 1} of {total_records}")
-        manager = KadiManager(instance=instance, host=host, pat=token)
-        record = manager.record(identifier=record_id)
+    for fidx, file_name in enumerate(file_names):
+        file_found = False
+        current_progress = 0.1 + (0.4 * (fidx/total_files))
         
-        for fidx, file_name in enumerate(file_names):
-            current_progress = 0.1 + (0.4 * (fidx/total_files))
-            progress(current_progress, desc=f"Processing file {fidx + 1} of {total_files}: {file_name}")
+        # Try each record until we find the file
+        for idx, record_id in enumerate(all_records_identifiers):
+            progress(current_progress, desc=f"Looking for {file_name} in record {idx + 1} of {total_records}")
+            manager = KadiManager(instance=instance, host=host, pat=token)
+            record = manager.record(identifier=record_id)
             
-            file_id = record.get_file_id(file_name)
-            with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-                temp_file_location = os.path.join(temp_dir, file_name)
-                record.download_file(file_id, temp_file_location)
-                docs = load_and_chunk_pdf(temp_file_location)
-                documents.extend(docs)
+            try:
+                file_id = record.get_file_id(file_name)
+                # If we get here, the file was found
+                with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+                    temp_file_location = os.path.join(temp_dir, file_name)
+                    record.download_file(file_id, temp_file_location)
+                    docs = load_and_chunk_pdf(temp_file_location)
+                    documents.extend(docs)
+                file_found = True
+                break
+            except kadi_apy.lib.exceptions.KadiAPYInputError:
+                continue  # File not found in this record, try next one
+        
+        if not file_found:
+            print(f"Warning: File {file_name} was not found in any record")
 
     if not documents:
         raise gr.Error("No documents could be processed")
