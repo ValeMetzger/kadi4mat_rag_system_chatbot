@@ -297,34 +297,43 @@ class SimpleRAG:
         if self.embeddings_model is None:
             self.embeddings_model = SentenceTransformer(
                 "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
-            )  # jinaai/jina-embeddings-v2-base-de?
+            )
 
-        # Use local model
-        # print("now doing embedding")
-        # print("len of documents", len(self.documents))
-        # embedding_responses = embeddings_client.post(json={"inputs":[doc["content"] for doc in self.documents]}, task="feature-extraction")
-        # self.embeddings = np.array(json.loads(embedding_responses.decode()))
-        self.embeddings = self.embeddings_model.encode(
-            [doc["content"] for doc in self.documents], show_progress_bar=True
+        # Use the same client for both indexing and searching
+        print("Getting document embeddings...")
+        embedding_responses = embeddings_client.post(
+            json={"inputs": [doc["content"] for doc in self.documents]}, 
+            task="feature-extraction"
         )
+        embeddings = json.loads(embedding_responses.decode())
+        
+        # Convert to numpy and get the final embedding
+        embeddings = np.array(embeddings)
+        if len(embeddings.shape) == 4:  # If we get (batch, 1, seq_len, hidden_dim)
+            embeddings = embeddings[:, 0, 0, :]  # Take first token embedding
+        
+        self.embeddings = embeddings
         self.index = faiss.IndexFlatL2(self.embeddings.shape[1])
         self.index.add(np.array(self.embeddings))
-        print("Vector database built successfully!")
+        print(f"Vector database built successfully! Index dimension: {self.index.d}")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
         
-        # Debug prints
         print("Getting query embedding...")
         embedding_responses = embeddings_client.post(
-            json={"inputs": [query]}, task="feature-extraction"
+            json={"inputs": [query]}, 
+            task="feature-extraction"
         )
         query_embedding = json.loads(embedding_responses.decode())
         print(f"Raw embedding shape: {np.array(query_embedding).shape}")
         
-        # Reshape the embedding
-        query_embedding = np.array(query_embedding).reshape(1, -1)
-        print(f"Reshaped embedding shape: {query_embedding.shape}")
+        # Process embedding the same way as in build_vector_db
+        query_embedding = np.array(query_embedding)
+        if len(query_embedding.shape) == 4:  # If we get (batch, 1, seq_len, hidden_dim)
+            query_embedding = query_embedding[:, 0, 0, :]  # Take first token embedding
+        
+        print(f"Processed embedding shape: {query_embedding.shape}")
         print(f"Index dimension: {self.index.d}")
         
         # Ensure dimensions match
