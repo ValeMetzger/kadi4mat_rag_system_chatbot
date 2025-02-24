@@ -544,11 +544,7 @@ app = gr.mount_gradio_app(app, login_demo, path="/main")
 
 # Gradio interface
 with gr.Blocks() as main_demo:
-
-    # State for storing user token
     _state_user_token = gr.State([])
-
-    # State for user rag
     user_session_rag = gr.State("placeholder")
 
     with gr.Row():
@@ -562,7 +558,11 @@ with gr.Blocks() as main_demo:
         with gr.Row():
             with gr.Column(scale=7):
                 chatbot = gr.Chatbot()
-
+                txt_input = gr.Textbox(
+                    label="Type your message here...",
+                    placeholder="Ask me about Kadi...",
+                    lines=2
+                )
             with gr.Column(scale=3):
                 process_files = gr.Button("Process All PDF Files")
                 message_box = gr.Textbox(label="Status", value="Click button to start", interactive=False)
@@ -574,7 +574,10 @@ with gr.Blocks() as main_demo:
 
         gr.Examples(examples=example_questions, inputs=[txt_input])
 
-        # Actions
+        # Add the chat submit action
+        txt_input.submit(respond, [txt_input, chatbot, user_session_rag], [chatbot, txt_input])
+
+        # Update the processing button click handler
         process_files.click(
             fn=prepare_all_files_for_chat,
             inputs=[_state_user_token],
