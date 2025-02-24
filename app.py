@@ -162,7 +162,7 @@ def get_files_in_record(all_records_identifiers, user_token, top_k=10):
         except kadi_apy.lib.exceptions.KadiAPYInputError as e:
             raise gr.Error(e)
 
-        file_num += record.get_number_files()
+        file_num = record.get_number_files()  # Initialize file_num here
 
         per_page = 100  # default in kadi
         not_divisible = file_num % per_page
@@ -170,7 +170,6 @@ def get_files_in_record(all_records_identifiers, user_token, top_k=10):
             page_num = file_num // per_page + 1
         else:
             page_num = file_num // per_page
-
         
         for p in range(1, page_num + 1):  # page starts at 1 in kadi
             file_names.extend(
@@ -182,11 +181,6 @@ def get_files_in_record(all_records_identifiers, user_token, top_k=10):
                 ]
             )
 
-        assert file_num == len(
-            file_names
-        ), "Number of files did not match, please check function get_all_file_names."
-
-    # return file_names[:top_k]
     return file_names
 
 
@@ -390,33 +384,41 @@ def prepare_file_for_chat(all_records_identifiers, file_names, token, progress=g
     documents = []
     for record_id in all_records_identifiers:
         if not file_names:
-            raise gr.Error("No file selected")
-        progress(0, desc="Starting")
-        # Create connection to kadi
-        manager = KadiManager(instance=instance, host=host, pat=token)
-        record = manager.record(identifier=record_id)
-        progress(0.2, desc="Loading files...")
-        # Parse files
-        # Download
-        for file_name in file_names:
-            file_id = record.get_file_id(file_name)
-            with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-                print(temp_dir)
-                temp_file_location = os.path.join(temp_dir, file_name)
-                record.download_file(file_id, temp_file_location)
-                # parse document
-                docs = load_and_chunk_pdf(temp_file_location)
-                documents.extend(docs)
+            raise gr.Error("No records found")
+    
+        if not file_names:
+            raise gr.Error("No files found in the selected records")
 
-    progress(0.4, desc="Embedding documents...")
-    user_rag = SimpleRAG()
-    user_rag.documents = documents
-    user_rag.embeddings_model = embeddings_model
-    user_rag.build_vector_db()
-    # print(documents[:2])
-    print("user rag created")
-    progress(1, desc="ready to chat")
-    return "ready to chat", user_rag
+        documents = []
+        for record_id in all_records_identifiers:
+            progress(0, desc="Starting")
+            # Create connection to kadi
+            manager = KadiManager(instance=instance, host=host, pat=token)
+            record = manager.record(identifier=record_id)
+            progress(0.2, desc="Loading files...")
+            # Parse files
+            # Download
+            for file_name in file_names:
+                file_id = record.get_file_id(file_name)
+                with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+                    print(temp_dir)
+                    temp_file_location = os.path.join(temp_dir, file_name)
+                    record.download_file(file_id, temp_file_location)
+                    # parse document
+                    docs = load_and_chunk_pdf(temp_file_location)
+                    documents.extend(docs)
+
+        if not documents:
+            raise gr.Error("No documents could be processed")
+
+        progress(0.4, desc="Embedding documents...")
+        user_rag = SimpleRAG()
+        user_rag.documents = documents
+        user_rag.embeddings_model = embeddings_model
+        user_rag.build_vector_db()
+        print("user rag created")
+        progress(1, desc="ready to chat")
+        return "ready to chat", user_rag
 
 
 def preprocess_response(response: str) -> str:
