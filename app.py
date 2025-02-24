@@ -149,38 +149,37 @@ def greet(request: gr.Request):
     return f"Welcome to Kadichat, you're logged in as: {request.username}"
 
 
-def get_files_in_record(all_records_identifiers, user_token):
-    """Get all file lists from all records."""
-    print(f"Starting get_files_in_record with {len(all_records_identifiers)} records")  # Debug print
+def get_files_in_record(record_list, user_token):
+    """Get all files with specific extensions from records."""
     
-    if not all_records_identifiers:
-        print("No records provided")  # Debug print
+    if not record_list:
         return []
         
     manager = KadiManager(instance=instance, host=host, pat=user_token)
-    all_file_names = []
+    allowed_extensions = ['.docx', '.pdf', '.md', '.txt']
+    file_list = []
 
-    for record_id in all_records_identifiers:
+    for record_id in record_list:
         try:
             record = manager.record(identifier=record_id)
-            file_num = record.get_number_files()
-
-            per_page = 100  # default in kadi
-            not_divisible = file_num % per_page
-            page_num = (file_num // per_page + 1) if not_divisible else (file_num // per_page)
-
-            for p in range(1, page_num + 1):  # page starts at 1 in kadi
-                file_names = [
-                    info["name"]
-                    for info in record.get_filelist(page=p, per_page=per_page).json()["items"]
-                ]
-                all_file_names.extend(file_names)
-
-        except kadi_apy.lib.exceptions.KadiAPYInputError as e:
-            print(f"Error accessing record {record_id}: {e}")
+            response = record.get_filelist()
+            if response.ok:
+                files = response.json()['items']
+                for file in files:
+                    file_name = file['name']
+                    file_ext = os.path.splitext(file_name)[1].lower()
+                    if file_ext in allowed_extensions:
+                        file_list.append({
+                            'record_id': record_id,
+                            'file_name': file_name,
+                            'file_id': file['id']
+                        })
+        except kadi_apy.lib.exceptions.KadiAPYRequestError as e:
+            print(f"Error processing record {record_id}: {e}")
             continue
 
-    return all_file_names
+    return file_list
+
 
 def get_all_records(user_token, progress=gr.Progress()):
     """Get all record list in Kadi."""
@@ -541,54 +540,45 @@ def process_file(file_path):
         return []
 
 
-def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
-    """Parse file and prepare RAG."""
+def prepare_file_for_chat(record_list, token, progress=gr.Progress()):
+    """Parse files and prepare RAG."""
     
     progress(0, desc="Starting")
-    # Create connection to kadi
     manager = KadiManager(instance=instance, host=host, pat=token)
-    record = manager.record(identifier=record_id)
     
-    progress(0.2, desc="Loading files...")
-    # Get all files in record
-    file_list = record.get_filelist().json()["items"]
+    # Get all valid files
+    progress(0.2, desc="Finding valid files...")
+    file_list = get_files_in_record(record_list, token)
     
-    # Filter files by extension
-    allowed_extensions = ['.docx', '.pdf', '.md', '.txt']
-    valid_files = [
-        file for file in file_list 
-        if any(file["name"].lower().endswith(ext) for ext in allowed_extensions)
-    ]
+    if not file_list:
+        raise gr.Error("No valid files found")
     
-    if not valid_files:
-        raise gr.Error("No valid files found in record")
-        
     # Parse files
+    progress(0.3, desc="Loading files...")
     documents = []
-    progress(0.3, desc=f"Processing {len(valid_files)} files...")
     
-    # Download and process each file
-    for file_info in valid_files:
-        file_name = file_info["name"]
-        file_id = file_info["id"]
-        
-        with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-            temp_file_location = os.path.join(temp_dir, file_name)
-            record.download_file(file_id, temp_file_location)
-            
+    with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+        for file_info in file_list:
             try:
-                # Handle different file types
-                if file_name.lower().endswith('.pdf'):
+                record = manager.record(identifier=file_info['record_id'])
+                temp_file_location = os.path.join(temp_dir, file_info['file_name'])
+                
+                # Download file
+                record.download_file(file_info['file_id'], temp_file_location)
+                
+                # Parse document based on extension
+                file_ext = os.path.splitext(file_info['file_name'])[1].lower()
+                if file_ext == '.pdf':
                     docs = load_and_chunk_pdf(temp_file_location)
-                else:
-                    # For text-based files, read directly
+                else:  # For .txt, .md, .docx
                     with open(temp_file_location, 'r', encoding='utf-8') as f:
                         text = f.read()
-                        docs = [{"content": chunk, "metadata": {"filename": file_name}} 
-                               for chunk in chunk_text(text)]
+                        docs = [{'content': chunk} for chunk in chunk_text(text)]
+                
                 documents.extend(docs)
+                
             except Exception as e:
-                print(f"Error processing {file_name}: {str(e)}")
+                print(f"Error processing file {file_info['file_name']}: {e}")
                 continue
 
     progress(0.6, desc="Embedding documents...")
@@ -597,8 +587,8 @@ def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
     user_rag.embeddings_model = embeddings_model
     user_rag.build_vector_db()
     
-    progress(1, desc=f"Ready to chat - processed {len(valid_files)} files")
-    return f"Ready to chat - processed {len(valid_files)} files", user_rag
+    progress(1, desc="Ready to chat")
+    return "Ready to chat", user_rag
 
 
 def preprocess_response(response: str) -> str:
@@ -676,28 +666,44 @@ with gr.Blocks() as main_demo:
             with gr.Column(scale=7):
                 chatbot = gr.Chatbot()
 
+
             with gr.Column(scale=3):
-                record_list = gr.Dropdown(label="Record Identifier")
+                record_list = gr.State([])
+                file_list = gr.State([])
                 
-                gr.Markdown("  " * 200)
-                main_demo.load(_init_user_token, None, _state_user_token).then(
-                    get_all_records, _state_user_token, record_list
+                load_files_btn = gr.Button("Load All Files")
+                progress_box = gr.Textbox(label="Progress", value="Click 'Load All Files' to start", interactive=False)
+                debug_box = gr.Textbox(label="Debug Info", interactive=False)
+                
+                # Initialize user token with debug output
+                main_demo.load(
+                    _init_user_token, 
+                    None, 
+                    [_state_user_token, debug_box],
                 )
 
-                parse_files = gr.Button("Process Record Files")
-                message_box = gr.Textbox(
-                    label="", value="progress bar", interactive=False
-                )
-                
-                # Create a hidden textbox for file_names parameter
-                file_names = gr.Textbox(visible=False, value="[]")
-                
-                # Modified click handler
-                parse_files.click(
+                def debug_step(step_name, data):
+                    print(f"Debug {step_name}:", data)
+                    return data, f"Completed {step_name} with data length: {len(data) if isinstance(data, list) else 'N/A'}"
+
+                # Chain of operations when button is clicked
+                load_files_btn.click(
+                    fn=lambda x: (x, f"Starting chain with token: {x}"),
+                    inputs=[_state_user_token],
+                    outputs=[_state_user_token, debug_box],
+                ).success(
+                    fn=get_all_records,
+                    inputs=[_state_user_token],
+                    outputs=[record_list],
+                    show_progress=True,
+                ).success(
                     fn=prepare_file_for_chat,
-                    inputs=[record_list, file_names, _state_user_token],
-                    outputs=[message_box, user_session_rag],
+                    inputs=[record_list, _state_user_token],
+                    outputs=[progress_box, user_session_rag],
+                    show_progress=True,
                 )
+
+
 
         with gr.Row():
             txt_input = gr.Textbox(
