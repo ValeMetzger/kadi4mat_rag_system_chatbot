@@ -508,8 +508,8 @@ with gr.Blocks() as main_demo:
                 )
 
                 # Hidden components needed for the workflow
-                record_list = gr.Dropdown(visible=False)
-                record_file_dropdown = gr.Dropdown(visible=False)
+                record_list = []
+                record_file_dropdown = []
 
                 # Initialize user token and get records list
                 main_demo.load(_init_user_token, None, _state_user_token)
