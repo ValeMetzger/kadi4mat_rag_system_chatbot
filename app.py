@@ -18,6 +18,7 @@ from requests.compat import urljoin
 from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
+from sentence_transformers import CrossEncoder
 
 # Kadi OAuth settings
 load_dotenv()
@@ -284,8 +285,8 @@ class SimpleRAG:
         self.embeddings_model = None
         self.embeddings = None
         self.index = None
-        # self.load_pdf("Brandt et al_2024_Kadi_info_page.pdf")
-        # self.build_vector_db()
+        # Initialize cross-encoder for re-ranking
+        self.cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
 
     def load_pdf(self, file_path: str) -> None:
         """Extracts text from a PDF file and stores it in the property documents by page."""
@@ -299,106 +300,87 @@ class SimpleRAG:
         # print("PDF processed successfully!")
 
     def build_vector_db(self) -> None:
-        """Builds a vector database with dimension debugging."""
+        """Builds a vector database with improved indexing."""
         if self.embeddings_model is None:
+            # Using a more powerful embedding model
             self.embeddings_model = SentenceTransformer(
-                "sentence-transformers/all-mpnet-base-v2", 
+                "hkunlp/instructor-xl",
                 trust_remote_code=True
             )
 
-        # Debug document count
-        print(f"Number of documents to embed: {len(self.documents)}")
-        
-        # Get embeddings
-        self.embeddings = self.embeddings_model.encode(
-            [doc["content"] for doc in self.documents],
-            show_progress_bar=True
-        )
-        
-        # Debug embedding dimensions
-        print(f"Embeddings shape: {self.embeddings.shape}")
-        print(f"Expected dimension: 768")  # mpnet-base-v2 dimension
-        
-        # Initialize FAISS index
-        dimension = self.embeddings.shape[1]
+        # Create FAISS index with metadata support
+        dimension = 768  # adjust based on model
         self.index = faiss.IndexFlatL2(dimension)
-        print(f"FAISS index dimension: {self.index.d}")
         
-        # Add vectors to index
+        # Add metadata storage
+        self.metadata = []
+        for doc in self.documents:
+            self.metadata.append({
+                'file_name': doc.get('metadata', {}).get('file_name', ''),
+                'record_id': doc.get('metadata', {}).get('record_id', ''),
+                'chunk_id': doc.get('metadata', {}).get('chunk_id', 0)
+            })
+
+        # Get embeddings with instruction
+        instruction = "Represent the text for retrieving relevant scientific document passages:"
+        texts = [instruction + doc["content"] for doc in self.documents]
+        self.embeddings = self.embeddings_model.encode(texts, show_progress_bar=True)
+        
         self.index.add(np.array(self.embeddings))
-        print(f"Total vectors in index: {self.index.ntotal}")
 
-    def search_documents(self, query: str, k: int = 4, threshold: float = 1000.0) -> List[str]:
-        """Searches for relevant documents using vector similarity."""
-
-            # Preprocess query to extract key terms
-        query = query.strip().lower()
+    def search_documents(self, query: str, k: int = 8, threshold: float = 1000.0) -> List[str]:
+        """Enhanced search with re-ranking and hybrid retrieval."""
         
-        print(f"\nDEBUG: Searching for query: {query}")
+        # Hybrid search preparation
+        query_terms = set(query.lower().split())
         
-        # Get query embedding
-        embedding_responses = embeddings_client.post(
-            json={"inputs": [query]}, task="feature-extraction"
-        )
-        query_embedding = json.loads(embedding_responses.decode())
+        # Get initial candidates through vector similarity
+        instruction = "Represent the question for retrieving relevant scientific document passages:"
+        query_embedding = self.embeddings_model.encode([instruction + query])
+        D, I = self.index.search(query_embedding, k * 2)  # Get more candidates for re-ranking
         
-        # Debug print
-        print(f"DEBUG: Query embedding shape: {np.array(query_embedding).shape}")
-        
-        # Handle the (1,1,8,768) shape by taking the first embedding
-        query_embedding = np.array(query_embedding)
-        if len(query_embedding.shape) > 2:
-            query_embedding = query_embedding[0, 0, 0].reshape(1, -1)
-        
-        print(f"DEBUG: Processed query shape: {query_embedding.shape}")
-        print(f"DEBUG: Index dimension: {self.index.d}")
-        
-        # Verify dimensions
-        assert query_embedding.shape[1] == self.index.d, \
-            f"Query dimension {query_embedding.shape[1]} != Index dimension {self.index.d}"
-        
-        # Search with larger initial k for reranking
-        k_initial = k * 3
-        # Search and get results
-        D, I = self.index.search(query_embedding, k_initial)
-        
-        # Rerank results using multiple criteria
-        results = []
+        candidates = []
         for distance, idx in zip(D[0], I[0]):
             if distance >= threshold:
                 continue
                 
             doc = self.documents[idx]
             content = doc["content"]
+            metadata = self.metadata[idx]
             
-            # Calculate additional relevance signals
-            exact_match_bonus = sum(term in content.lower() for term in query.split()) * 0.1
+            # Hybrid scoring
+            term_overlap = len(query_terms.intersection(set(content.lower().split())))
+            hybrid_score = distance * (1.0 - (term_overlap * 0.1))
             
-            # Adjust final score
-            adjusted_score = distance - (exact_match_bonus * distance)
-            
-            results.append({
-                "content": content,
-                "score": adjusted_score,
-                "metadata": doc.get("metadata", {}),
-                "source": doc.get("file_name", "Unknown"),
-                "page": doc.get("page", 0)
+            candidates.append({
+                'content': content,
+                'distance': distance,
+                'hybrid_score': hybrid_score,
+                'metadata': metadata
             })
         
-        # Sort by adjusted score and take top k
-        results.sort(key=lambda x: x["score"])
-        results = results[:k]
+        # Re-rank using cross-encoder
+        if candidates:
+            pairs = [(query, doc['content']) for doc in candidates]
+            cross_scores = self.cross_encoder.predict(pairs)
+            
+            # Combine scores
+            for idx, doc in enumerate(candidates):
+                doc['final_score'] = (doc['hybrid_score'] + cross_scores[idx]) / 2
+            
+            # Sort and select top k
+            candidates.sort(key=lambda x: x['final_score'])
+            candidates = candidates[:k]
         
-        # Format results with metadata
-        formatted_results = []
-        for result in results:
-            context = f"[Source: {result['source']}"
-            if result['page']:
-                context += f", Page {result['page']}"
-            context += f", Relevance: {1 - result['score']/threshold:.2f}]"
-            formatted_results.append(f"{context}\n{result['content']}")
+        # Format results
+        results = []
+        for doc in candidates:
+            metadata = doc['metadata']
+            context = f"[Source: {metadata['file_name']}, Record: {metadata['record_id']}, "
+            context += f"Relevance: {1 - doc['final_score']/threshold:.2f}]"
+            results.append(f"{context}\n{doc['content']}")
         
-        return formatted_results if formatted_results else ["No relevant documents found."]
+        return results if results else ["No relevant documents found."]
 
 
 def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
@@ -556,19 +538,33 @@ def preprocess_response(response: str) -> str:
 
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
-    """Get respond from LLMs with improved context handling."""
+    """Enhanced response generation with better prompting."""
     
-    # Get relevant documents for current query
+    # Get relevant documents
     retrieved_docs = user_session_rag.search_documents(message)
     context = "\n".join(retrieved_docs)
     
-    # Create a focused system message
-    system_message = """You are an assistant helping users with Kadi-related questions. 
-    Base your answers primarily on the provided relevant documents, but maintain conversation coherence.
+    # Calculate approximate token count (rough estimation)
+    token_estimate = len(context.split()) + len(message.split())
+    if token_estimate > 2000:  # Adjust based on your model's limits
+        # Truncate context while keeping most relevant parts
+        context = "\n".join(retrieved_docs[:3])
     
-    Relevant documents for the current query:
-    {}""".format(context)
-    
+    # Enhanced prompt template
+    system_message = """You are an expert assistant specializing Scientific related information. 
+    Your task is to provide accurate, helpful answers based primarily on the provided context.
+    If the context doesn't contain enough information to fully answer the question, acknowledge this 
+    and provide the best possible answer with the available information.
+
+    Retrieved Context:
+    {}
+
+    Guidelines:
+    - Base your answer primarily on the provided context
+    - Cite specific sources when possible
+    - If information is missing or unclear, be transparent about it
+    - Maintain a professional and helpful tone""".format(context)
+
     # Build conversation history with limited context window
     messages = [{"role": "system", "content": system_message}]
     
