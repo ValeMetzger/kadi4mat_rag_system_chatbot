@@ -541,27 +541,80 @@ def load_docx(file_path):
     return documents
 
 
-def process_file(file_path):
-    """Process a file based on its extension."""
-    file_extension = file_path.lower().split('.')[-1]
+def process_file(file_path: str) -> List[str]:
+    """Process a single document file and generate chunks."""
+    file_type = file_path.split('.')[-1].lower()
+    chunks = []
     
-    processors = {
-        'pdf': load_and_chunk_pdf,
-        'txt': load_text_file,
-        'md': load_markdown_file,
-        'docx': load_docx
-    }
+    print(f"\nProcessing file: {file_path} of type {file_type}")
     
-    processor = processors.get(file_extension)
-    if processor is None:
-        print(f"Unsupported file type: {file_extension}")
+    try:
+        if file_type == "pdf":
+            doc = pymupdf.open(file_path)
+            text = ""
+            print(f"PDF pages: {doc.page_count}")
+            for page in doc:
+                page_text = page.get_text()
+                print(f"Page text length: {len(page_text)}")
+                text += page_text
+                
+        elif file_type == "docx":
+            doc = Document(file_path)
+            text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+            print(f"DOCX text length: {len(text)}")
+            
+        elif file_type in ["txt", "md"]:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                text = f.read()
+                print(f"{file_type.upper()} text length: {len(text)}")
+                
+        else:
+            print(f"Skipping unsupported file type: {file_type}")
+            return []
+
+        # Only process if we have meaningful text
+        if len(text.strip()) > 0:
+            chunks = create_chunks(text)
+            print(f"Generated {len(chunks)} chunks from text of length {len(text)}")
+        else:
+            print("No text content found in file")
+            
+    except Exception as e:
+        print(f"Error processing file {file_path}: {str(e)}")
         return []
         
-    try:
-        return processor(file_path)
-    except Exception as e:
-        print(f"Error processing file {file_path}: {e}")
-        return []
+    return chunks
+
+def create_chunks(text: str, max_chunk_size: int = 1000, overlap: int = 100) -> List[str]:
+    """Create overlapping chunks from text."""
+    chunks = []
+    start = 0
+    text_length = len(text)
+    
+    print(f"Creating chunks from text of length {text_length}")
+    print(f"Using max_chunk_size={max_chunk_size}, overlap={overlap}")
+    
+    while start < text_length:
+        end = start + max_chunk_size
+        if end > text_length:
+            end = text_length
+        
+        # Adjust end to avoid breaking sentences
+        if end < text_length:
+            # Look for sentence boundaries (., !, ?)
+            for i in range(end, start, -1):
+                if text[i-1] in '.!?' and (i == text_length or text[i].isspace()):
+                    end = i
+                    break
+                    
+        chunk = text[start:end].strip()
+        if chunk:  # Only add non-empty chunks
+            chunks.append(chunk)
+            print(f"Created chunk of length {len(chunk)}")
+            
+        start = end - overlap
+        
+    return chunks
 
 
 def prepare_file_for_chat(all_records_identifiers, all_file_names, token, progress=gr.Progress()):
