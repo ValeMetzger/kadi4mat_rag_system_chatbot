@@ -149,7 +149,7 @@ def greet(request: gr.Request):
 def get_files_in_record(all_records_identifiers, user_token, progress=gr.Progress()):
     """Get all file list within one record."""
     if not all_records_identifiers:
-        return []
+        return [], "No records found"
 
     progress(0, desc="Connecting to Kadi...")
     manager = KadiManager(instance=instance, host=host, pat=user_token)
@@ -185,13 +185,13 @@ def get_files_in_record(all_records_identifiers, user_token, progress=gr.Progres
             )
 
     progress(1.0, desc="Files loaded!")
-    return file_names
+    return file_names, f"Found {len(file_names)} files"
 
 
 def get_all_records(user_token, progress=gr.Progress()):
     """Get all record list in Kadi."""
     if not user_token:
-        return []
+        return [], "No user token found"
 
     progress(0, desc="Connecting to Kadi...")
     manager = KadiManager(instance=instance, host=host, pat=user_token)
@@ -222,7 +222,7 @@ def get_all_records(user_token, progress=gr.Progress()):
         all_records_identifiers.extend(get_page_records(parsed))
 
     progress(1.0, desc="Records loaded!")
-    return all_records_identifiers
+    return all_records_identifiers, f"Found {len(all_records_identifiers)} records"
 
 
 def _init_user_token(request: gr.Request):
@@ -509,8 +509,11 @@ with gr.Blocks() as main_demo:
 
             with gr.Column(scale=3):
                 get_files_btn = gr.Button("Get All Files")
+                status_box = gr.Textbox(
+                    label="Status", value="Click 'Get All Files' to start", interactive=False
+                )
                 message_box = gr.Textbox(
-                    label="", value="Click 'Get All Files' to start", interactive=False
+                    label="Chat Status", value="", interactive=False
                 )
 
                 # Change these from lists to Gradio components
@@ -522,15 +525,17 @@ with gr.Blocks() as main_demo:
 
                 # Create chain of events when Get All Files is clicked
                 get_files_btn.click(
-                    get_all_records, _state_user_token, record_list
-                ).then(
+                    fn=get_all_records,
+                    inputs=[_state_user_token],
+                    outputs=[record_list, status_box]
+                ).success(
                     fn=get_files_in_record,
                     inputs=[record_list, _state_user_token],
-                    outputs=record_file_dropdown
-                ).then(
+                    outputs=[record_file_dropdown, status_box]
+                ).success(
                     fn=prepare_file_for_chat,
                     inputs=[record_list, record_file_dropdown, _state_user_token],
-                    outputs=[message_box, user_session_rag],
+                    outputs=[message_box, user_session_rag]
                 )
 
         with gr.Row():
