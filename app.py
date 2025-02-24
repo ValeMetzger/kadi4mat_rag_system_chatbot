@@ -157,14 +157,12 @@ def get_files_in_record(all_records_identifiers, user_token, top_k=10):
     for record_id in all_records_identifiers:
         try:
             record = manager.record(identifier=record_id)
-            # Initialize file_num for this record
-            file_num = record.get_number_files()
-            
-            # Get initial file list
             file_list = record.get_filelist().json()
             file_names.extend([info["name"] for info in file_list["items"]])
         except kadi_apy.lib.exceptions.KadiAPYInputError as e:
             raise gr.Error(e)
+
+        file_num += record.get_number_files()
 
         per_page = 100  # default in kadi
         not_divisible = file_num % per_page
@@ -173,8 +171,8 @@ def get_files_in_record(all_records_identifiers, user_token, top_k=10):
         else:
             page_num = file_num // per_page
 
-        # Start from page 2 since we already got page 1
-        for p in range(2, page_num + 1):  # page starts at 1 in kadi
+        
+        for p in range(1, page_num + 1):  # page starts at 1 in kadi
             file_names.extend(
                 [
                     info["name"]
@@ -184,6 +182,11 @@ def get_files_in_record(all_records_identifiers, user_token, top_k=10):
                 ]
             )
 
+        assert file_num == len(
+            file_names
+        ), "Number of files did not match, please check function get_all_file_names."
+
+    # return file_names[:top_k]
     return file_names
 
 
