@@ -363,12 +363,20 @@ def load_and_chunk_pdf(file_path):
     with pymupdf.open(file_path) as pdf:
         text = ""
         for page in pdf:
-            text += page.get_text()
+            # Get text and clean it
+            page_text = page.get_text()
+            # Remove repeated numbers and dots pattern
+            page_text = ' '.join(page_text.split())  # Normalize whitespace
+            # Remove repeated number patterns (like 1.1.1.1...)
+            page_text = ' '.join([word for word in page_text.split() if not all(c in '0123456789.' for c in word)])
+            text += page_text + "\n\n"
 
+        # Chunk the cleaned text
         chunks = chunk_text(text)
         documents = []
         for chunk in chunks:
-            documents.append({"content": chunk, "metadata": pdf.metadata})
+            if chunk.strip():  # Only add non-empty chunks
+                documents.append({"content": chunk, "metadata": pdf.metadata})
 
         return documents
 
