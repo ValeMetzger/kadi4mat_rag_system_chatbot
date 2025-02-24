@@ -160,36 +160,71 @@ def get_files_in_record(all_records_identifiers, user_token, top_k=10):
             file_list = record.get_filelist().json()
             file_names.extend([info["name"] for info in file_list["items"]])
         except kadi_apy.lib.exceptions.KadiAPYInputError as e:
-            raise gr.Error(str(e))
+            raise gr.Error(e)
 
+        file_num = record.get_number_files()
+
+        per_page = 100  # default in kadi
+        not_divisible = file_num % per_page
+        if not_divisible:
+            page_num = file_num // per_page + 1
+        else:
+            page_num = file_num // per_page
+
+        
+        for p in range(1, page_num + 1):  # page starts at 1 in kadi
+            file_names.extend(
+                [
+                    info["name"]
+                    for info in record.get_filelist(page=p, per_page=per_page).json()[
+                        "items"
+                    ]
+                ]
+            )
+
+        assert file_num == len(
+            file_names
+        ), "Number of files did not match, please check function get_all_file_names."
+
+    # return file_names[:top_k]
     return file_names
 
 
 def get_all_records(user_token):
     """Get all record list in Kadi."""
+
     if not user_token:
         return []
 
     manager = KadiManager(instance=instance, host=host, pat=user_token)
-    
-    try:
-        response = manager.search.search_resources("record", per_page=100)
+
+    host_api = manager.host if manager.host.endswith("/") else manager.host + "/"
+    searched_resource = "records"
+    endpoint = urljoin(
+        host_api, searched_resource
+    )  # e.g https://demo-kadi4mat.iam.kit.edu/api/" + "records"
+
+    response = manager.search.search_resources("record", per_page=100)
+    parsed = json.loads(response.content)
+
+    total_pages = parsed["_pagination"]["total_pages"]
+
+    def get_page_records(parsed_content):
+        item_identifiers = []
+        items = parsed_content["items"]
+        for item in items:
+            item_identifiers.append(item["identifier"])
+
+        return item_identifiers
+
+    all_records_identifiers = []
+    for page in range(1, total_pages + 1):
+        page_endpoint = endpoint + f"?page={page}&per_page=100"
+        response = manager.make_request(page_endpoint)
         parsed = json.loads(response.content)
-        
-        # Get all identifiers from first page
-        identifiers = [item["identifier"] for item in parsed["items"]]
-        
-        # Get remaining pages if they exist
-        total_pages = parsed["_pagination"]["total_pages"]
-        for page in range(2, total_pages + 1):
-            response = manager.search.search_resources("record", page=page, per_page=100)
-            parsed = json.loads(response.content)
-            identifiers.extend([item["identifier"] for item in parsed["items"]])
-            
-        return identifiers
-    except Exception as e:
-        print(f"Error getting records: {str(e)}")
-        return []
+        all_records_identifiers.extend(get_page_records(parsed))
+
+    return all_records_identifiers
 
 
 def _init_user_token(request: gr.Request):
@@ -351,48 +386,37 @@ def load_pdf(file_path):
 
 def prepare_file_for_chat(all_records_identifiers, file_names, token, progress=gr.Progress()):
     """Parse file and prepare RAG."""
-    if not all_records_identifiers:
-        raise gr.Error("No records available")
-    
-    if not file_names:
-        raise gr.Error("Please wait for files to load")
 
     documents = []
-    progress(0, desc="Starting")
-    
-    try:
+    for record_id in all_records_identifiers:
+        if not file_names:
+            raise gr.Error("No file selected")
+        progress(0, desc="Starting")
+        # Create connection to kadi
         manager = KadiManager(instance=instance, host=host, pat=token)
-        
-        for record_id in all_records_identifiers:
-            record = manager.record(identifier=record_id)
-            progress(0.2, desc="Loading files...")
-            
-            for file_name in file_names:
-                try:
-                    file_id = record.get_file_id(file_name)
-                    with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-                        temp_file_location = os.path.join(temp_dir, file_name)
-                        record.download_file(file_id, temp_file_location)
-                        docs = load_and_chunk_pdf(temp_file_location)
-                        documents.extend(docs)
-                except Exception as e:
-                    print(f"Error processing file {file_name}: {str(e)}")
-                    continue
+        record = manager.record(identifier=record_id)
+        progress(0.2, desc="Loading files...")
+        # Parse files
+        # Download
+        for file_name in file_names:
+            file_id = record.get_file_id(file_name)
+            with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+                print(temp_dir)
+                temp_file_location = os.path.join(temp_dir, file_name)
+                record.download_file(file_id, temp_file_location)
+                # parse document
+                docs = load_and_chunk_pdf(temp_file_location)
+                documents.extend(docs)
 
-        if not documents:
-            raise gr.Error("No documents could be processed")
-
-        progress(0.4, desc="Embedding documents...")
-        user_rag = SimpleRAG()
-        user_rag.documents = documents
-        user_rag.embeddings_model = embeddings_model
-        user_rag.build_vector_db()
-        
-        progress(1, desc="Ready to chat")
-        return "Ready to chat!", user_rag
-
-    except Exception as e:
-        raise gr.Error(f"Error preparing chat: {str(e)}")
+    progress(0.4, desc="Embedding documents...")
+    user_rag = SimpleRAG()
+    user_rag.documents = documents
+    user_rag.embeddings_model = embeddings_model
+    user_rag.build_vector_db()
+    # print(documents[:2])
+    print("user rag created")
+    progress(1, desc="ready to chat")
+    return "ready to chat", user_rag
 
 
 def preprocess_response(response: str) -> str:
@@ -478,37 +502,29 @@ with gr.Blocks() as main_demo:
                 chatbot = gr.Chatbot()
 
             with gr.Column(scale=3):
-                record_list = gr.Dropdown(label="Select Records", multiselect=True, visible=True)
-                get_files_btn = gr.Button("Get Files for Selected Records")
-                record_file_dropdown = gr.Dropdown(label="Select Files", multiselect=True, visible=True)
-                message_box = gr.Textbox(label="Status", value="Select records and click 'Get Files'", interactive=False)
-
-                # Initialize user token and get records list
-                main_demo.load(
-                    fn=_init_user_token,
-                    outputs=_state_user_token
-                ).then(
-                    fn=get_all_records,
-                    inputs=[_state_user_token],
-                    outputs=record_list
+                get_files_btn = gr.Button("Get All Files")
+                message_box = gr.Textbox(
+                    label="", value="Click 'Get All Files' to start", interactive=False
                 )
 
-                # Create chain of events when Get Files is clicked
+                # Hidden components needed for the workflow
+                record_list = gr.Dropdown(visible=False)
+                record_file_dropdown = gr.Dropdown(visible=False)
+
+                # Initialize user token and get records list
+                main_demo.load(_init_user_token, None, _state_user_token)
+
+                # Create chain of events when Get All Files is clicked
                 get_files_btn.click(
+                    get_all_records, _state_user_token, record_list
+                ).then(
                     fn=get_files_in_record,
                     inputs=[record_list, _state_user_token],
                     outputs=record_file_dropdown
-                ).success(
-                    fn=lambda: "Files loaded. Select files and click Submit to start chat.",
-                    outputs=message_box
-                )
-
-                # Add a submit button for file selection
-                submit_files_btn = gr.Button("Submit Selected Files")
-                submit_files_btn.click(
+                ).then(
                     fn=prepare_file_for_chat,
                     inputs=[record_list, record_file_dropdown, _state_user_token],
-                    outputs=[message_box, user_session_rag]
+                    outputs=[message_box, user_session_rag],
                 )
 
         with gr.Row():
