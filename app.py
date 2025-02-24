@@ -167,39 +167,29 @@ def get_files_in_record(all_records_identifiers, user_token, top_k=10):
 
 def get_all_records(user_token):
     """Get all record list in Kadi."""
-
     if not user_token:
         return []
 
     manager = KadiManager(instance=instance, host=host, pat=user_token)
-
-    host_api = manager.host if manager.host.endswith("/") else manager.host + "/"
-    searched_resource = "records"
-    endpoint = urljoin(
-        host_api, searched_resource
-    )  # e.g https://demo-kadi4mat.iam.kit.edu/api/" + "records"
-
-    response = manager.search.search_resources("record", per_page=100)
-    parsed = json.loads(response.content)
-
-    total_pages = parsed["_pagination"]["total_pages"]
-
-    def get_page_records(parsed_content):
-        item_identifiers = []
-        items = parsed_content["items"]
-        for item in items:
-            item_identifiers.append(item["identifier"])
-
-        return item_identifiers
-
-    all_records_identifiers = []
-    for page in range(1, total_pages + 1):
-        page_endpoint = endpoint + f"?page={page}&per_page=100"
-        response = manager.make_request(page_endpoint)
+    
+    try:
+        response = manager.search.search_resources("record", per_page=100)
         parsed = json.loads(response.content)
-        all_records_identifiers.extend(get_page_records(parsed))
-
-    return all_records_identifiers
+        
+        # Get all identifiers from first page
+        identifiers = [item["identifier"] for item in parsed["items"]]
+        
+        # Get remaining pages if they exist
+        total_pages = parsed["_pagination"]["total_pages"]
+        for page in range(2, total_pages + 1):
+            response = manager.search.search_resources("record", page=page, per_page=100)
+            parsed = json.loads(response.content)
+            identifiers.extend([item["identifier"] for item in parsed["items"]])
+            
+        return identifiers
+    except Exception as e:
+        print(f"Error getting records: {str(e)}")
+        return []
 
 
 def _init_user_token(request: gr.Request):
@@ -488,29 +478,41 @@ with gr.Blocks() as main_demo:
                 chatbot = gr.Chatbot()
 
             with gr.Column(scale=3):
-                get_files_btn = gr.Button("Get All Files")
-                message_box = gr.Textbox(
-                    label="", value="Click 'Get All Files' to start", interactive=False
-                )
-
-                # Hidden components needed for the workflow
-                record_list = gr.Dropdown(visible=False)
-                record_file_dropdown = gr.Dropdown(visible=False)
+                record_list = gr.Dropdown(label="Select Records", multiselect=True, visible=True)
+                get_files_btn = gr.Button("Get Files for Selected Records")
+                record_file_dropdown = gr.Dropdown(label="Select Files", multiselect=True, visible=True)
+                message_box = gr.Textbox(label="Status", value="Select records and click 'Get Files'", interactive=False)
 
                 # Initialize user token and get records list
-                main_demo.load(_init_user_token, None, _state_user_token).then(
-                    get_all_records, _state_user_token, record_list
+                main_demo.load(
+                    fn=lambda: None,  # Initialize
+                    outputs=[_state_user_token, record_list],
+                    _js="() => [null, []]"
+                ).then(
+                    fn=_init_user_token,
+                    outputs=_state_user_token
+                ).then(
+                    fn=get_all_records,
+                    inputs=[_state_user_token],
+                    outputs=record_list
                 )
 
-                # Create chain of events when Get All Files is clicked
+                # Create chain of events when Get Files is clicked
                 get_files_btn.click(
                     fn=get_files_in_record,
                     inputs=[record_list, _state_user_token],
                     outputs=record_file_dropdown
-                ).then(
+                ).success(
+                    fn=lambda: "Files loaded. Select files and click Submit to start chat.",
+                    outputs=message_box
+                )
+
+                # Add a submit button for file selection
+                submit_files_btn = gr.Button("Submit Selected Files")
+                submit_files_btn.click(
                     fn=prepare_file_for_chat,
                     inputs=[record_list, record_file_dropdown, _state_user_token],
-                    outputs=[message_box, user_session_rag],
+                    outputs=[message_box, user_session_rag]
                 )
 
         with gr.Row():
