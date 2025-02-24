@@ -415,31 +415,34 @@ def get_all_pdf_files(token, progress=gr.Progress()):
         
         # Get records for this page - using search_resources instead of direct endpoint
         response = manager.search.search_resources("record", page=page, per_page=100)
-        parsed = json.loads(response.content)
-        
-        # Process each record
-        for item in parsed["data"]:  # Changed from "items" to "data"
-            record = manager.record(id=item["id"])
+        if response.ok:
+            parsed = response.json()  # Use .json() method directly
             
-            # Get all files in this record
-            file_num = record.get_number_files()
-            if file_num == 0:
-                continue
+            # Process each record
+            for item in parsed["items"]:  # Changed back to "items"
+                record = manager.record(id=item["id"])
                 
-            per_page = 100
-            page_num = (file_num + per_page - 1) // per_page
-            
-            for p in range(1, page_num + 1):
-                files = record.get_filelist(page=p, per_page=per_page).json()
+                # Get all files in this record
+                file_num = record.get_number_files()
+                if file_num == 0:
+                    continue
+                    
+                per_page = 100
+                page_num = (file_num + per_page - 1) // per_page
                 
-                # Filter for PDF files and process them
-                for file_info in files["data"]:  # Changed from "items" to "data"
-                    if file_info["name"].lower().endswith('.pdf'):
-                        with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-                            temp_file_location = os.path.join(temp_dir, file_info["name"])
-                            record.download_file(file_info["id"], temp_file_location)
-                            docs = load_and_chunk_pdf(temp_file_location)
-                            documents.extend(docs)
+                for p in range(1, page_num + 1):
+                    files = record.get_filelist(page=p, per_page=per_page)
+                    if files.ok:
+                        files_data = files.json()
+                        
+                        # Filter for PDF files and process them
+                        for file_info in files_data["items"]:  # Changed back to "items"
+                            if file_info["name"].lower().endswith('.pdf'):
+                                with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+                                    temp_file_location = os.path.join(temp_dir, file_info["name"])
+                                    record.download_file(file_info["id"], temp_file_location)
+                                    docs = load_and_chunk_pdf(temp_file_location)
+                                    documents.extend(docs)
         
         current_progress += progress_per_page
     
