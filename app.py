@@ -313,14 +313,25 @@ class SimpleRAG:
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
-
-        # Use embeddings_client
-        # query_embedding = self.embeddings_model.encode([query], show_progress_bar=False)
+        
+        # Debug prints
+        print("Getting query embedding...")
         embedding_responses = embeddings_client.post(
             json={"inputs": [query]}, task="feature-extraction"
         )
         query_embedding = json.loads(embedding_responses.decode())
-        D, I = self.index.search(np.array(query_embedding), k)
+        print(f"Raw embedding shape: {np.array(query_embedding).shape}")
+        
+        # Reshape the embedding
+        query_embedding = np.array(query_embedding).reshape(1, -1)
+        print(f"Reshaped embedding shape: {query_embedding.shape}")
+        print(f"Index dimension: {self.index.d}")
+        
+        # Ensure dimensions match
+        if query_embedding.shape[1] != self.index.d:
+            raise ValueError(f"Embedding dimension {query_embedding.shape[1]} does not match index dimension {self.index.d}")
+        
+        D, I = self.index.search(query_embedding, k)
         results = [self.documents[i]["content"] for i in I[0]]
         return results if results else ["No relevant documents found."]
 
