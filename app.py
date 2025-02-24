@@ -286,19 +286,6 @@ class SimpleRAG:
         self.embeddings_model = None
         self.embeddings = None
         self.index = None
-        # Initialize cross-encoder for re-ranking
-        self.cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
-
-    def load_pdf(self, file_path: str) -> None:
-        """Extracts text from a PDF file and stores it in the property documents by page."""
-
-        doc = pymupdf.open(file_path)
-        self.documents = []
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            text = page.get_text()
-            self.documents.append({"page": page_num + 1, "content": text})
-        # print("PDF processed successfully!")
 
     def build_vector_db(self) -> None:
         """Builds a vector database using the content of the PDF."""
@@ -308,10 +295,12 @@ class SimpleRAG:
                 trust_remote_code=True
             )
 
-        # Get embeddings (simpler approach)
+        # Get embeddings for document contents
+        contents = [doc["content"] for doc in self.documents]
         self.embeddings = self.embeddings_model.encode(
-            [doc["content"] for doc in self.documents], 
-            show_progress_bar=True
+            contents,
+            show_progress_bar=True,
+            batch_size=32
         )
         
         # Create FAISS index
@@ -319,61 +308,26 @@ class SimpleRAG:
         self.index = faiss.IndexFlatL2(dimension)
         self.index.add(np.array(self.embeddings))
 
-    def search_documents(self, query: str, k: int = 8, threshold: float = 1000.0) -> List[str]:
-        """Enhanced search with re-ranking and hybrid retrieval."""
-        print(f"Searching for query: '{query[:50]}...' with k={k}")
-        
-        # Hybrid search preparation
-        query_terms = set(query.lower().split())
-        
-        # Get initial candidates through vector similarity
-        instruction = "Represent the question for retrieving relevant scientific document passages:"
-        query_embedding = self.embeddings_model.encode([instruction + query])
-        D, I = self.index.search(query_embedding, k * 2)  # Get more candidates for re-ranking
-        
-        print(f"Found {len(I[0])} initial candidates")
-        
-        candidates = []
-        for distance, idx in zip(D[0], I[0]):
-            if distance >= threshold:
-                continue
-                
-            doc = self.documents[idx]
-            content = doc["content"]
-            metadata = self.metadata[idx]
+    def search_documents(self, query: str, k: int = 4) -> List[str]:
+        """Searches for relevant documents using vector similarity."""
+        if not self.documents:
+            return ["No documents available."]
             
-            # Hybrid scoring
-            term_overlap = len(query_terms.intersection(set(content.lower().split())))
-            hybrid_score = distance * (1.0 - (term_overlap * 0.1))
-            
-            candidates.append({
-                'content': content,
-                'distance': distance,
-                'hybrid_score': hybrid_score,
-                'metadata': metadata
-            })
+        print(f"Searching for query: '{query}' with k={k}")
         
-        # Re-rank using cross-encoder
-        if candidates:
-            pairs = [(query, doc['content']) for doc in candidates]
-            cross_scores = self.cross_encoder.predict(pairs)
-            
-            # Combine scores
-            for idx, doc in enumerate(candidates):
-                doc['final_score'] = (doc['hybrid_score'] + cross_scores[idx]) / 2
-            
-            # Sort and select top k
-            candidates.sort(key=lambda x: x['final_score'])
-            candidates = candidates[:k]
+        # Get query embedding
+        query_embedding = self.embeddings_model.encode([query])
         
-        # Format results
+        # Search index
+        D, I = self.index.search(np.array(query_embedding), k)
+        print(f"Found {len(I[0])} matches")
+        
+        # Return content of matched documents
         results = []
-        for doc in candidates:
-            metadata = doc['metadata']
-            context = f"[Source: {metadata['file_name']}, Record: {metadata['record_id']}, "
-            context += f"Relevance: {1 - doc['final_score']/threshold:.2f}]"
-            results.append(f"{context}\n{doc['content']}")
-        
+        for idx in I[0]:
+            if 0 <= idx < len(self.documents):
+                results.append(self.documents[idx]["content"])
+                
         return results if results else ["No relevant documents found."]
 
 
@@ -599,17 +553,24 @@ def preprocess_response(response: str) -> str:
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     """Get respond from LLMs."""
     # Get relevant documents
-    retrieved_docs = user_session_rag.search_documents(message)
-    context = "\n".join(retrieved_docs)
+    retrieved_docs = user_session_rag.search_documents(message, k=4)
     
-    system_message = """You are an assistant to help user to answer question related to Kadi based on Relevant documents.
-    Relevant documents: {}""".format(context)
+    # Combine retrieved documents into context
+    context = "\n---\n".join(retrieved_docs)
+    
+    # Create system message with context
+    system_message = """You are an assistant to help users answer questions related to Kadi and research papers. 
+    Use the following relevant documents to answer the question. If you cannot find relevant information in the documents, say so.
+    
+    Relevant documents:
+    {}""".format(context)
     
     messages = [
         {"role": "assistant", "content": system_message},
-        {"role": "user", "content": f"\nQuestion: {message}"}
+        {"role": "user", "content": message}
     ]
 
+    # Get response from LLM
     response = client.chat_completion(
         messages,
         max_tokens=2048,
