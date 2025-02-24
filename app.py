@@ -395,6 +395,11 @@ def prepare_file_for_chat(all_records_identifiers, file_names, token, progress=g
     total_files = len(file_names)
     
     for fidx, file_name in enumerate(file_names):
+        # Skip non-PDF files
+        if not file_name.lower().endswith('.pdf'):
+            print(f"Skipping non-PDF file: {file_name}")
+            continue
+            
         file_found = False
         current_progress = 0.1 + (0.4 * (fidx/total_files))
         
@@ -421,7 +426,7 @@ def prepare_file_for_chat(all_records_identifiers, file_names, token, progress=g
             print(f"Warning: File {file_name} was not found in any record")
 
     if not documents:
-        raise gr.Error("No documents could be processed")
+        raise gr.Error("No PDF documents could be processed")
 
     progress(0.5, desc="Initializing embeddings model...")
     user_rag = SimpleRAG()
