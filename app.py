@@ -413,13 +413,12 @@ def get_all_pdf_files(token, progress=gr.Progress()):
     for page in range(1, total_pages + 1):
         progress(current_progress, desc=f"Processing record page {page}/{total_pages}")
         
-        # Get records for this page
-        endpoint = f"{manager.host}/api/records?page={page}&per_page=100"
-        response = manager.make_request(endpoint)
+        # Get records for this page - using search_resources instead of direct endpoint
+        response = manager.search.search_resources("record", page=page, per_page=100)
         parsed = json.loads(response.content)
         
         # Process each record
-        for item in parsed["items"]:
+        for item in parsed["data"]:  # Changed from "items" to "data"
             record = manager.record(id=item["id"])
             
             # Get all files in this record
@@ -431,10 +430,10 @@ def get_all_pdf_files(token, progress=gr.Progress()):
             page_num = (file_num + per_page - 1) // per_page
             
             for p in range(1, page_num + 1):
-                files = record.get_filelist(page=p, per_page=per_page).json()["items"]
+                files = record.get_filelist(page=p, per_page=per_page).json()
                 
                 # Filter for PDF files and process them
-                for file_info in files:
+                for file_info in files["data"]:  # Changed from "items" to "data"
                     if file_info["name"].lower().endswith('.pdf'):
                         with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
                             temp_file_location = os.path.join(temp_dir, file_info["name"])
