@@ -192,7 +192,8 @@ def get_files_in_record(record_id, user_token, top_k=10):
 
 
 def get_all_records(user_token):
-    """Get all record list in Kadi and their PDF files."""
+    """Get all record list in Kadi."""
+
     if not user_token:
         return []
 
@@ -200,46 +201,36 @@ def get_all_records(user_token):
 
     host_api = manager.host if manager.host.endswith("/") else manager.host + "/"
     searched_resource = "records"
-    endpoint = urljoin(host_api, searched_resource)
+    endpoint = urljoin(
+        host_api, searched_resource
+    )  # e.g https://demo-kadi4mat.iam.kit.edu/api/" + "records"
 
     response = manager.search.search_resources("record", per_page=100)
     parsed = json.loads(response.content)
+
     total_pages = parsed["_pagination"]["total_pages"]
 
-    all_records_data = []
-    # Get all records and their files
+    def get_page_records(parsed_content):
+        item_identifiers = []
+        items = parsed_content["items"]
+        for item in items:
+            item_identifiers.append(item["identifier"])
+
+        return item_identifiers
+
+    all_records_identifiers = []
     for page in range(1, total_pages + 1):
         page_endpoint = endpoint + f"?page={page}&per_page=100"
         response = manager.make_request(page_endpoint)
         parsed = json.loads(response.content)
-        
-        for item in parsed["items"]:
-            record_id = item["identifier"]
-            record = manager.record(identifier=record_id)
-            
-            # Get files for each record
-            file_num = record.get_number_files()
-            if file_num == 0:
-                continue
+        all_records_identifiers.extend(get_page_records(parsed))
 
-            per_page = 100
-            page_num = (file_num + per_page - 1) // per_page  # Ceiling division
-            
-            pdf_files = []
-            for p in range(1, page_num + 1):
-                files = record.get_filelist(page=p, per_page=per_page).json()["items"]
-                pdf_files.extend([
-                    info["name"] for info in files 
-                    if info["name"].lower().endswith('.pdf')
-                ])
-            
-            if pdf_files:  # Only store records with PDF files
-                all_records_data.append({
-                    "record_id": record_id,
-                    "pdf_files": pdf_files
-                })
-
-    return all_records_data
+    return gr.Dropdown(
+        choices=all_records_identifiers,
+        interactive=True,
+        label="Record Identifier",
+        info="Select record to get file list",
+    )
 
 
 def _init_user_token(request: gr.Request):
@@ -399,40 +390,95 @@ def load_pdf(file_path):
     return documents
 
 
-def prepare_files_for_chat(token, progress=gr.Progress()):
-    """Parse all PDF files and prepare RAG."""
+def get_all_records_and_files(user_token):
+    """Get all records and their PDF files from Kadi."""
+    if not user_token:
+        return []
+
+    manager = KadiManager(instance=instance, host=host, pat=user_token)
+    host_api = manager.host if manager.host.endswith("/") else manager.host + "/"
+    endpoint = urljoin(host_api, "records")
+
+    # Get initial response to determine total pages
+    response = manager.search.search_resources("record", per_page=100)
+    parsed = json.loads(response.content)
+    total_pages = parsed["_pagination"]["total_pages"]
+
+    # Store record data
+    record_files = {}
     
-    progress(0, desc="Starting")
-    # Get all records and their PDF files
-    all_records = get_all_records(token)
-    
-    progress(0.2, desc="Loading files...")
-    # Parse files
-    documents = []
-    manager = KadiManager(instance=instance, host=host, pat=token)
-    
-    # Process each record and its files
-    for record_data in all_records:
-        record = manager.record(identifier=record_data["record_id"])
+    # Iterate through all pages
+    for page in range(1, total_pages + 1):
+        page_endpoint = endpoint + f"?page={page}&per_page=100"
+        response = manager.make_request(page_endpoint)
+        parsed = json.loads(response.content)
         
-        # Download and process each PDF file
-        for file_name in record_data["pdf_files"]:
+        # Process each record
+        for item in parsed["items"]:
+            record_id = item["identifier"]
+            try:
+                record = manager.record(identifier=record_id)
+                file_num = record.get_number_files()
+                
+                if file_num > 0:
+                    # Get all files for this record
+                    pdf_files = []
+                    pages_needed = (file_num + 99) // 100  # Ceiling division
+                    
+                    for p in range(1, pages_needed + 1):
+                        files = record.get_filelist(page=p, per_page=100).json()["items"]
+                        pdf_files.extend([
+                            f["name"] for f in files 
+                            if f["name"].lower().endswith('.pdf')
+                        ])
+                    
+                    if pdf_files:  # Only store records that have PDF files
+                        record_files[record_id] = pdf_files
+                        
+            except Exception as e:
+                print(f"Error processing record {record_id}: {e}")
+                continue
+
+    return record_files
+
+
+def prepare_all_files_for_chat(user_token, progress=gr.Progress()):
+    """Process all PDF files from all records and prepare RAG."""
+    progress(0, desc="Starting")
+    
+    # Get all records and their files
+    progress(0.1, desc="Fetching records...")
+    record_files = get_all_records_and_files(user_token)
+    
+    # Create connection to kadi
+    manager = KadiManager(instance=instance, host=host, pat=user_token)
+    
+    # Parse all files
+    documents = []
+    total_records = len(record_files)
+    
+    for idx, (record_id, file_names) in enumerate(record_files.items()):
+        progress(0.2 + (0.6 * idx/total_records), desc=f"Processing record {record_id}...")
+        
+        record = manager.record(identifier=record_id)
+        
+        # Download and process each file
+        for file_name in file_names:
             file_id = record.get_file_id(file_name)
             with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
                 temp_file_location = os.path.join(temp_dir, file_name)
                 record.download_file(file_id, temp_file_location)
-                # Parse document
                 docs = load_and_chunk_pdf(temp_file_location)
                 documents.extend(docs)
 
-    progress(0.4, desc="Embedding documents...")
+    progress(0.8, desc="Building vector database...")
     user_rag = SimpleRAG()
     user_rag.documents = documents
     user_rag.embeddings_model = embeddings_model
     user_rag.build_vector_db()
     
     progress(1, desc="Ready to chat")
-    return "Ready to chat with all PDF files", user_rag
+    return "All files processed and ready to chat", user_rag
 
 
 def preprocess_response(response: str) -> str:
@@ -498,8 +544,10 @@ app = gr.mount_gradio_app(app, login_demo, path="/main")
 
 # Gradio interface
 with gr.Blocks() as main_demo:
+
     # State for storing user token
     _state_user_token = gr.State([])
+
     # State for user rag
     user_session_rag = gr.State("placeholder")
 
@@ -514,24 +562,10 @@ with gr.Blocks() as main_demo:
         with gr.Row():
             with gr.Column(scale=7):
                 chatbot = gr.Chatbot()
+
             with gr.Column(scale=3):
-                process_files_btn = gr.Button("Process All PDF Files")
-                message_box = gr.Textbox(label="", value="Click button to start processing", interactive=False)
-
-        # Initialize user token
-        main_demo.load(_init_user_token, None, _state_user_token)
-        
-        # Process files when button is clicked
-        process_files_btn.click(
-            fn=prepare_files_for_chat,
-            inputs=[_state_user_token],
-            outputs=[message_box, user_session_rag],
-        )
-
-        with gr.Row():
-            txt_input = gr.Textbox(show_label=False, placeholder="Type your question here...", lines=1)
-            submit_btn = gr.Button("Submit", scale=1)
-            refresh_btn = gr.Button("Refresh Chat", scale=1, variant="secondary")
+                process_files = gr.Button("Process All PDF Files")
+                message_box = gr.Textbox(label="Status", value="Click button to start", interactive=False)
 
         example_questions = [
             ["Summarize the paper."],
@@ -541,17 +575,11 @@ with gr.Blocks() as main_demo:
         gr.Examples(examples=example_questions, inputs=[txt_input])
 
         # Actions
-        txt_input.submit(
-            fn=respond,
-            inputs=[txt_input, chatbot, user_session_rag],
-            outputs=[chatbot, txt_input],
+        process_files.click(
+            fn=prepare_all_files_for_chat,
+            inputs=[_state_user_token],
+            outputs=[message_box, user_session_rag],
         )
-        submit_btn.click(
-            fn=respond,
-            inputs=[txt_input, chatbot, user_session_rag],
-            outputs=[chatbot, txt_input],
-        )
-        refresh_btn.click(lambda: [], None, chatbot)
 
 app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
 
