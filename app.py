@@ -18,9 +18,6 @@ from requests.compat import urljoin
 from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
-from sentence_transformers import CrossEncoder
-from docx import Document
-import markdown
 
 # Kadi OAuth settings
 load_dotenv()
@@ -149,95 +146,98 @@ def greet(request: gr.Request):
     return f"Welcome to Kadichat, you're logged in as: {request.username}"
 
 
-def get_files_in_record(record_list, user_token):
-    """Get all files with specific extensions from records."""
-    
-    if not record_list:
-        return []
-        
+def get_files_in_record(record_id, user_token, top_k=10):
+    """Get all file list within one record."""
+
     manager = KadiManager(instance=instance, host=host, pat=user_token)
-    allowed_extensions = ['.docx', '.pdf', '.md', '.txt']
-    file_list = []
-
-    for record_id in record_list:
-        try:
-            record = manager.record(identifier=record_id)
-            response = record.get_filelist()
-            if response.ok:
-                files = response.json()['items']
-                for file in files:
-                    file_name = file['name']
-                    file_ext = os.path.splitext(file_name)[1].lower()
-                    if file_ext in allowed_extensions:
-                        file_list.append({
-                            'record_id': record_id,
-                            'file_name': file_name,
-                            'file_id': file['id']
-                        })
-        except kadi_apy.lib.exceptions.KadiAPYRequestError as e:
-            print(f"Error processing record {record_id}: {e}")
-            continue
-
-    return file_list
-
-
-def get_all_records(user_token, progress=gr.Progress()):
-    """Get all record list in Kadi."""
-    print("Starting get_all_records with token:", user_token)  # Debug print
-    progress(0, desc="Starting record collection...")
-    if not user_token:
-        print("No token provided")  # Debug print
-        return []
 
     try:
-        manager = KadiManager(instance=instance, host=host, pat=user_token)
+        record = manager.record(identifier=record_id)
+    except kadi_apy.lib.exceptions.KadiAPYInputError as e:
+        raise gr.Error(e)
 
-        host_api = manager.host if manager.host.endswith("/") else manager.host + "/"
-        searched_resource = "records"
-        endpoint = urljoin(
-            host_api, searched_resource
-        )  # e.g https://demo-kadi4mat.iam.kit.edu/api/" + "records"
+    file_num = record.get_number_files()
 
-        response = manager.search.search_resources("record", per_page=100)
-        parsed = json.loads(response.content)
+    per_page = 100  # default in kadi
+    not_divisible = file_num % per_page
+    if not_divisible:
+        page_num = file_num // per_page + 1
+    else:
+        page_num = file_num // per_page
 
-        total_pages = parsed["_pagination"]["total_pages"]
+    file_names = []
+    for p in range(1, page_num + 1):  # page starts at 1 in kadi
+        file_names.extend(
+            [
+                info["name"]
+                for info in record.get_filelist(page=p, per_page=per_page).json()[
+                    "items"
+                ]
+            ]
+        )
 
-        def get_page_records(parsed_content):
-            item_identifiers = []
-            items = parsed_content["items"]
-            for item in items:
-                item_identifiers.append(item["identifier"])
+    assert file_num == len(
+        file_names
+    ), "Number of files did not match, please check function get_all_file_names."
 
-            return item_identifiers
+    # return file_names[:top_k]
+    return gr.Dropdown(
+        choices=file_names[:top_k],
+        label="Select file",
+        info="Select (max. 3) files to chat with.",
+        multiselect=True,
+        max_choices=3,
+        interactive=True,
+    )
 
-        progress(0.5, desc="Fetching records...")
-        all_records_identifiers = []
-        for page in range(1, total_pages + 1):
-            progress(0.5 + (0.5 * page/total_pages), desc=f"Processing page {page}/{total_pages}")
-            page_endpoint = endpoint + f"?page={page}&per_page=100"
-            response = manager.make_request(page_endpoint)
-            parsed = json.loads(response.content)
-            all_records_identifiers.extend(get_page_records(parsed))
 
-        print(f"Found {len(all_records_identifiers)} records")  # Debug print
-        return all_records_identifiers
-    except Exception as e:
-        print(f"Error in get_all_records: {e}")  # Debug print
+def get_all_records(user_token):
+    """Get all record list in Kadi."""
+
+    if not user_token:
         return []
+
+    manager = KadiManager(instance=instance, host=host, pat=user_token)
+
+    host_api = manager.host if manager.host.endswith("/") else manager.host + "/"
+    searched_resource = "records"
+    endpoint = urljoin(
+        host_api, searched_resource
+    )  # e.g https://demo-kadi4mat.iam.kit.edu/api/" + "records"
+
+    response = manager.search.search_resources("record", per_page=100)
+    parsed = json.loads(response.content)
+
+    total_pages = parsed["_pagination"]["total_pages"]
+
+    def get_page_records(parsed_content):
+        item_identifiers = []
+        items = parsed_content["items"]
+        for item in items:
+            item_identifiers.append(item["identifier"])
+
+        return item_identifiers
+
+    all_records_identifiers = []
+    for page in range(1, total_pages + 1):
+        page_endpoint = endpoint + f"?page={page}&per_page=100"
+        response = manager.make_request(page_endpoint)
+        parsed = json.loads(response.content)
+        all_records_identifiers.extend(get_page_records(parsed))
+
+    return gr.Dropdown(
+        choices=all_records_identifiers,
+        interactive=True,
+        label="Record Identifier",
+        info="Select record to get file list",
+    )
 
 
 def _init_user_token(request: gr.Request):
     """Init user token."""
-    try:
-        user_token = request.request.session["user_access_token"]
-        debug_msg = f"Token initialized: {user_token is not None}"
-        print(debug_msg)  # Debug print
-        return user_token, debug_msg
-    except Exception as e:
-        error_msg = f"Error initializing token: {e}"
-        print(error_msg)
-        return None, error_msg
+
+    user_token = request.request.session["user_access_token"]
+    return user_token
 
 
 # Landing page for login
@@ -286,55 +286,55 @@ class SimpleRAG:
         self.embeddings_model = None
         self.embeddings = None
         self.index = None
+        # self.load_pdf("Brandt et al_2024_Kadi_info_page.pdf")
+        # self.build_vector_db()
+
+    def load_pdf(self, file_path: str) -> None:
+        """Extracts text from a PDF file and stores it in the property documents by page."""
+
+        doc = pymupdf.open(file_path)
+        self.documents = []
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text = page.get_text()
+            self.documents.append({"page": page_num + 1, "content": text})
+        # print("PDF processed successfully!")
 
     def build_vector_db(self) -> None:
         """Builds a vector database using the content of the PDF."""
         if self.embeddings_model is None:
             self.embeddings_model = SentenceTransformer(
-                "sentence-transformers/all-mpnet-base-v2", 
-                trust_remote_code=True
-            )
+                "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
+            )  # jinaai/jina-embeddings-v2-base-de?
 
-        # Get embeddings for document contents
-        contents = [doc["content"] for doc in self.documents]
+        # Use local model
+        # print("now doing embedding")
+        # print("len of documents", len(self.documents))
+        # embedding_responses = embeddings_client.post(json={"inputs":[doc["content"] for doc in self.documents]}, task="feature-extraction")
+        # self.embeddings = np.array(json.loads(embedding_responses.decode()))
         self.embeddings = self.embeddings_model.encode(
-            contents,
-            show_progress_bar=True,
-            batch_size=32
+            [doc["content"] for doc in self.documents], show_progress_bar=True
         )
-        
-        # Create FAISS index
-        dimension = self.embeddings.shape[1]
-        self.index = faiss.IndexFlatL2(dimension)
+        self.index = faiss.IndexFlatL2(self.embeddings.shape[1])
         self.index.add(np.array(self.embeddings))
+        print("Vector database built successfully!")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
-        if not self.documents:
-            return ["No documents available."]
-            
-        print(f"Searching for query: '{query}' with k={k}")
-        
-        # Get query embedding
-        query_embedding = self.embeddings_model.encode([query])
-        
-        # Search index
+
+        # Use embeddings_client
+        # query_embedding = self.embeddings_model.encode([query], show_progress_bar=False)
+        embedding_responses = embeddings_client.post(
+            json={"inputs": [query]}, task="feature-extraction"
+        )
+        query_embedding = json.loads(embedding_responses.decode())
         D, I = self.index.search(np.array(query_embedding), k)
-        print(f"Found {len(I[0])} matches")
-        
-        # Return content of matched documents
-        results = []
-        for idx in I[0]:
-            if 0 <= idx < len(self.documents):
-                results.append(self.documents[idx]["content"])
-                
+        results = [self.documents[i]["content"] for i in I[0]]
         return results if results else ["No relevant documents found."]
 
 
 def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
     """Chunk text into pieces of specified size with overlap, considering separators."""
-    print(f"\nDEBUG: Chunking text of length {len(text)} characters")
-    print(f"DEBUG: Using chunk_size={chunk_size}, overlap_size={overlap_size}")
 
     # Split the text by the separators
     for sep in separators:
@@ -354,38 +354,25 @@ def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"
 
         chunk = text[start:end].strip()  # Strip trailing whitespace
         chunks.append(chunk)
-        
-        print(f"DEBUG: Created chunk {len(chunks)} with length {len(chunk)} characters")
 
         # Move the start position forward by the overlap size
         start += chunk_size - overlap_size
 
-    print(f"DEBUG: Final number of chunks: {len(chunks)}")
     return chunks
 
 
 def load_and_chunk_pdf(file_path):
     """Extracts text from a PDF file and stores it in the property documents by chunks."""
-    print(f"\nDEBUG: Processing PDF: {file_path}")
 
     with pymupdf.open(file_path) as pdf:
         text = ""
-        for page_num, page in enumerate(pdf):
-            page_text = page.get_text()
-            text += page_text
-            print(f"DEBUG: Page {page_num + 1} length: {len(page_text)} characters")
+        for page in pdf:
+            text += page.get_text()
 
         chunks = chunk_text(text)
-        print(f"DEBUG: Created {len(chunks)} chunks from PDF")
-        print(f"DEBUG: Average chunk size: {sum(len(c) for c in chunks)/len(chunks):.0f} characters")
-        print(f"DEBUG: First chunk preview: {chunks[0][:200]}...")
-        
         documents = []
-        for i, chunk in enumerate(chunks):
-            documents.append({
-                "content": chunk,
-                "metadata": {**pdf.metadata, "chunk_id": i}
-            })
+        for chunk in chunks:
+            documents.append({"content": chunk, "metadata": pdf.metadata})
 
         return documents
 
@@ -403,136 +390,103 @@ def load_pdf(file_path):
     return documents
 
 
-def load_text_file(file_path):
-    """Extracts text from a plain text file."""
-    print(f"\nDEBUG: Processing text file: {file_path}")
+def get_all_pdf_files(token, progress=gr.Progress()):
+    """Get all PDF files from all records."""
     
-    with open(file_path, 'r', encoding='utf-8') as file:
-        text = file.read()
-        
-    chunks = chunk_text(text)
-    documents = []
-    for i, chunk in enumerate(chunks):
-        documents.append({
-            "content": chunk,
-            "metadata": {"file_type": "text", "chunk_id": i}
-        })
-    
-    return documents
-
-
-def load_markdown_file(file_path):
-    """Extracts text from a markdown file."""
-    print(f"\nDEBUG: Processing markdown file: {file_path}")
-    
-    with open(file_path, 'r', encoding='utf-8') as file:
-        md_text = file.read()
-        # Convert markdown to plain text
-        html = markdown.markdown(md_text)
-        # Simple HTML tag removal (you might want to use a proper HTML parser for better results)
-        text = html.replace('<p>', '\n\n').replace('</p>', '').replace('<br>', '\n')
-        
-    chunks = chunk_text(text)
-    documents = []
-    for i, chunk in enumerate(chunks):
-        documents.append({
-            "content": chunk,
-            "metadata": {"file_type": "markdown", "chunk_id": i}
-        })
-    
-    return documents
-
-
-def load_docx(file_path):
-    """Extracts text from a Word document."""
-    print(f"\nDEBUG: Processing Word document: {file_path}")
-    
-    doc = Document(file_path)
-    text = '\n\n'.join([paragraph.text for paragraph in doc.paragraphs])
-    
-    chunks = chunk_text(text)
-    documents = []
-    for i, chunk in enumerate(chunks):
-        documents.append({
-            "content": chunk,
-            "metadata": {"file_type": "docx", "chunk_id": i}
-        })
-    
-    return documents
-
-
-def process_file(file_path):
-    """Process a file based on its extension."""
-    file_extension = file_path.lower().split('.')[-1]
-    
-    processors = {
-        'pdf': load_and_chunk_pdf,
-        'txt': load_text_file,
-        'md': load_markdown_file,
-        'docx': load_docx
-    }
-    
-    processor = processors.get(file_extension)
-    if processor is None:
-        print(f"Unsupported file type: {file_extension}")
-        return []
-        
-    try:
-        return processor(file_path)
-    except Exception as e:
-        print(f"Error processing file {file_path}: {e}")
-        return []
-
-
-def prepare_file_for_chat(record_list, token, progress=gr.Progress()):
-    """Parse files and prepare RAG."""
+    if not token:
+        raise gr.Error("No user token available")
     
     progress(0, desc="Starting")
     manager = KadiManager(instance=instance, host=host, pat=token)
     
-    # Get all valid files
-    progress(0.2, desc="Finding valid files...")
-    file_list = get_files_in_record(record_list, token)
+    # Get all records
+    progress(0.1, desc="Getting records...")
+    response = manager.search.search_resources("record", per_page=100)
+    parsed = json.loads(response.content)
+    total_pages = parsed["_pagination"]["total_pages"]
     
-    if not file_list:
-        raise gr.Error("No valid files found")
-    
-    # Parse files
-    progress(0.3, desc="Loading files...")
+    # Collect all documents
     documents = []
+    current_progress = 0.1
+    progress_per_page = 0.8 / total_pages  # Save 0.1 for start and end
     
-    with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-        for file_info in file_list:
-            try:
-                record = manager.record(identifier=file_info['record_id'])
-                temp_file_location = os.path.join(temp_dir, file_info['file_name'])
-                
-                # Download file
-                record.download_file(file_info['file_id'], temp_file_location)
-                
-                # Parse document based on extension
-                file_ext = os.path.splitext(file_info['file_name'])[1].lower()
-                if file_ext == '.pdf':
-                    docs = load_and_chunk_pdf(temp_file_location)
-                else:  # For .txt, .md, .docx
-                    with open(temp_file_location, 'r', encoding='utf-8') as f:
-                        text = f.read()
-                        docs = [{'content': chunk} for chunk in chunk_text(text)]
-                
-                documents.extend(docs)
-                
-            except Exception as e:
-                print(f"Error processing file {file_info['file_name']}: {e}")
+    for page in range(1, total_pages + 1):
+        progress(current_progress, desc=f"Processing record page {page}/{total_pages}")
+        
+        # Get records for this page
+        endpoint = f"{manager.host}/api/records?page={page}&per_page=100"
+        response = manager.make_request(endpoint)
+        parsed = json.loads(response.content)
+        
+        # Process each record
+        for item in parsed["items"]:
+            record = manager.record(id=item["id"])
+            
+            # Get all files in this record
+            file_num = record.get_number_files()
+            if file_num == 0:
                 continue
-
-    progress(0.6, desc="Embedding documents...")
+                
+            per_page = 100
+            page_num = (file_num + per_page - 1) // per_page
+            
+            for p in range(1, page_num + 1):
+                files = record.get_filelist(page=p, per_page=per_page).json()["items"]
+                
+                # Filter for PDF files and process them
+                for file_info in files:
+                    if file_info["name"].lower().endswith('.pdf'):
+                        with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+                            temp_file_location = os.path.join(temp_dir, file_info["name"])
+                            record.download_file(file_info["id"], temp_file_location)
+                            docs = load_and_chunk_pdf(temp_file_location)
+                            documents.extend(docs)
+        
+        current_progress += progress_per_page
+    
+    progress(0.9, desc="Building vector database...")
+    # Create and populate RAG system
     user_rag = SimpleRAG()
     user_rag.documents = documents
     user_rag.embeddings_model = embeddings_model
     user_rag.build_vector_db()
     
     progress(1, desc="Ready to chat")
-    return "Ready to chat", user_rag
+    return "Ready to chat with all PDF files!", user_rag
+
+
+def prepare_file_for_chat(record_id, file_names, token, progress=gr.Progress()):
+    """Parse file and prepare RAG."""
+
+    if not file_names:
+        raise gr.Error("No file selected")
+    progress(0, desc="Starting")
+    # Create connection to kadi
+    manager = KadiManager(instance=instance, host=host, pat=token)
+    record = manager.record(identifier=record_id)
+    progress(0.2, desc="Loading files...")
+    # Parse files
+    documents = []
+    # Download
+    for file_name in file_names:
+        file_id = record.get_file_id(file_name)
+        with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+            print(temp_dir)
+            temp_file_location = os.path.join(temp_dir, file_name)
+            record.download_file(file_id, temp_file_location)
+            # parse document
+            docs = load_and_chunk_pdf(temp_file_location)
+            documents.extend(docs)
+
+    progress(0.4, desc="Embedding documents...")
+    user_rag = SimpleRAG()
+    user_rag.documents = documents
+    user_rag.embeddings_model = embeddings_model
+    user_rag.build_vector_db()
+    # print(documents[:2])
+    print("user rag created")
+    progress(1, desc="ready to chat")
+    return "ready to chat", user_rag
 
 
 def preprocess_response(response: str) -> str:
@@ -552,38 +506,44 @@ def preprocess_response(response: str) -> str:
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     """Get respond from LLMs."""
-    # Get relevant documents
-    retrieved_docs = user_session_rag.search_documents(message, k=4)
-    
-    # Combine retrieved documents into context
-    context = "\n---\n".join(retrieved_docs)
-    
-    # Create system message with context
-    system_message = """You are an assistant to help users answer questions related to Kadi and research papers. 
-    Use the following relevant documents to answer the question. If you cannot find relevant information in the documents, say so.
-    
-    Relevant documents:
-    {}""".format(context)
-    
-    messages = [
-        {"role": "assistant", "content": system_message},
-        {"role": "user", "content": message}
-    ]
 
-    # Get response from LLM
-    response = client.chat_completion(
-        messages,
-        max_tokens=2048,
-        temperature=0.0
+    # message is the current input query from user
+    # RAG
+    retrieved_docs = user_session_rag.search_documents(message)
+    context = "\n".join(retrieved_docs)
+    system_message = "You are an assistant to help user to answer question related to Kadi based on Relevant documents.\nRelevant documents: {}".format(
+        context
     )
-    
-    response_content = "".join([
-        choice.message["content"]
-        for choice in response.choices
-        if "content" in choice.message
-    ])
+    messages = [{"role": "assistant", "content": system_message}]
 
-    history.append((message, response_content))
+    # Add history for conversational chat, TODO
+    # for val in history:
+    #     #if val[0]:
+    #     messages.append({"role": "user", "content": val[0]})
+    #     #if val[1]:
+    #     messages.append({"role": "assistant", "content": val[1]})
+
+    messages.append({"role": "user", "content": f"\nQuestion: {message}"})
+
+    # print("-----------------")
+    # print(messages)
+    # print("-----------------")
+    # Get anwser from LLM
+    response = client.chat_completion(
+        messages, max_tokens=2048, temperature=0.0
+    )  # , top_p=0.9)
+    response_content = "".join(
+        [
+            choice.message["content"]
+            for choice in response.choices
+            if "content" in choice.message
+        ]
+    )
+
+    # Process response
+    polished_response = preprocess_response(response_content)
+
+    history.append((message, polished_response))
     return history, ""
 
 
@@ -592,78 +552,58 @@ app = gr.mount_gradio_app(app, login_demo, path="/main")
 
 # Gradio interface
 with gr.Blocks() as main_demo:
-
     # State for storing user token
     _state_user_token = gr.State([])
-
+    
     # State for user rag
     user_session_rag = gr.State("placeholder")
-
+    
     with gr.Row():
         with gr.Column(scale=7):
             m = gr.Markdown("Welcome to Chatbot!")
             main_demo.load(greet, None, m)
         with gr.Column(scale=1):
             gr.Button("Logout", link="/logout")
-
+    
     with gr.Tab("Main"):
         with gr.Row():
             with gr.Column(scale=7):
                 chatbot = gr.Chatbot()
-
-
+            
             with gr.Column(scale=3):
-                record_list = gr.State([])
-                file_list = gr.State([])
-                
-                load_files_btn = gr.Button("Load All Files")
-                progress_box = gr.Textbox(label="Progress", value="Click 'Load All Files' to start", interactive=False)
-                debug_box = gr.Textbox(label="Debug Info", interactive=False)
-                
-                # Initialize user token with debug output
-                main_demo.load(
-                    _init_user_token, 
-                    None, 
-                    [_state_user_token, debug_box],
+                load_files_btn = gr.Button("Load All PDF Files")
+                message_box = gr.Textbox(
+                    label="", 
+                    value="Click 'Load All PDF Files' to start", 
+                    interactive=False
                 )
-
-                def debug_step(step_name, data):
-                    print(f"Debug {step_name}:", data)
-                    return data, f"Completed {step_name} with data length: {len(data) if isinstance(data, list) else 'N/A'}"
-
-                # Chain of operations when button is clicked
+                
+                # Initialize user token
+                main_demo.load(_init_user_token, None, _state_user_token)
+                
+                # Load files button action
                 load_files_btn.click(
-                    fn=lambda x: (x, f"Starting chain with token: {x}"),
+                    fn=get_all_pdf_files,
                     inputs=[_state_user_token],
-                    outputs=[_state_user_token, debug_box],
-                ).success(
-                    fn=get_all_records,
-                    inputs=[_state_user_token],
-                    outputs=[record_list],
-                    show_progress=True,
-                ).success(
-                    fn=prepare_file_for_chat,
-                    inputs=[record_list, _state_user_token],
-                    outputs=[progress_box, user_session_rag],
-                    show_progress=True,
+                    outputs=[message_box, user_session_rag],
                 )
-
-
-
+        
         with gr.Row():
             txt_input = gr.Textbox(
-                show_label=False, placeholder="Type your question here...", lines=1
+                show_label=False,
+                placeholder="Type your question here...",
+                lines=1
             )
             submit_btn = gr.Button("Submit", scale=1)
             refresh_btn = gr.Button("Refresh Chat", scale=1, variant="secondary")
-
+        
         example_questions = [
-            ["Summarize the paper."],
-            ["how to create record in kadi4mat?"],
+            ["Summarize all papers."],
+            ["What are the main topics discussed in the documents?"],
         ]
-
+        
         gr.Examples(examples=example_questions, inputs=[txt_input])
-
+        
         # Actions
         txt_input.submit(
             fn=respond,
