@@ -299,41 +299,46 @@ class SimpleRAG:
                 "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
             )
 
-        # Use the same client for both indexing and searching
         print("Getting document embeddings...")
-        embedding_responses = embeddings_client.post(
-            json={"inputs": [doc["content"] for doc in self.documents]}, 
-            task="feature-extraction"
-        )
-        embeddings = json.loads(embedding_responses.decode())
         
-        # Convert to numpy and get the final embedding
-        embeddings = np.array(embeddings)
-        if len(embeddings.shape) == 4:  # If we get (batch, 1, seq_len, hidden_dim)
-            embeddings = embeddings[:, 0, 0, :]  # Take first token embedding
+        # Process documents in batches
+        batch_size = 32  # Adjust based on your memory constraints
+        num_documents = len(self.documents)
+        all_embeddings = []
         
-        self.embeddings = embeddings
+        for i in range(0, num_documents, batch_size):
+            batch_docs = [doc["content"] for doc in self.documents[i:i + batch_size]]
+            print(f"Processing batch {i//batch_size + 1} of {(num_documents + batch_size - 1)//batch_size}")
+            
+            # Use local model instead of API for faster processing
+            embeddings = self.embeddings_model.encode(
+                batch_docs,
+                convert_to_numpy=True,
+                show_progress_bar=True
+            )
+            all_embeddings.append(embeddings)
+        
+        # Combine all batches
+        self.embeddings = np.vstack(all_embeddings)
+        
+        # Build the FAISS index
+        print("Building FAISS index...")
         self.index = faiss.IndexFlatL2(self.embeddings.shape[1])
-        self.index.add(np.array(self.embeddings))
+        self.index.add(self.embeddings)
         print(f"Vector database built successfully! Index dimension: {self.index.d}")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
         
         print("Getting query embedding...")
-        embedding_responses = embeddings_client.post(
-            json={"inputs": [query]}, 
-            task="feature-extraction"
+        # Use local model for consistency with build_vector_db
+        query_embedding = self.embeddings_model.encode(
+            [query],
+            convert_to_numpy=True,
+            show_progress_bar=False
         )
-        query_embedding = json.loads(embedding_responses.decode())
-        print(f"Raw embedding shape: {np.array(query_embedding).shape}")
         
-        # Process embedding the same way as in build_vector_db
-        query_embedding = np.array(query_embedding)
-        if len(query_embedding.shape) == 4:  # If we get (batch, 1, seq_len, hidden_dim)
-            query_embedding = query_embedding[:, 0, 0, :]  # Take first token embedding
-        
-        print(f"Processed embedding shape: {query_embedding.shape}")
+        print(f"Query embedding shape: {query_embedding.shape}")
         print(f"Index dimension: {self.index.d}")
         
         # Ensure dimensions match
