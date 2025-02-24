@@ -148,6 +148,8 @@ def greet(request: gr.Request):
 
 def get_files_in_record(all_records_identifiers, user_token, top_k=10):
     """Get all file list within one record."""
+    if not all_records_identifiers:
+        return []
 
     manager = KadiManager(instance=instance, host=host, pat=user_token)
 
@@ -155,34 +157,11 @@ def get_files_in_record(all_records_identifiers, user_token, top_k=10):
     for record_id in all_records_identifiers:
         try:
             record = manager.record(identifier=record_id)
+            file_list = record.get_filelist().json()
+            file_names.extend([info["name"] for info in file_list["items"]])
         except kadi_apy.lib.exceptions.KadiAPYInputError as e:
-            raise gr.Error(e)
+            raise gr.Error(str(e))
 
-        file_num = record.get_number_files()
-
-        per_page = 100  # default in kadi
-        not_divisible = file_num % per_page
-        if not_divisible:
-            page_num = file_num // per_page + 1
-        else:
-            page_num = file_num // per_page
-
-        
-        for p in range(1, page_num + 1):  # page starts at 1 in kadi
-            file_names.extend(
-                [
-                    info["name"]
-                    for info in record.get_filelist(page=p, per_page=per_page).json()[
-                        "items"
-                    ]
-                ]
-            )
-
-        assert file_num == len(
-            file_names
-        ), "Number of files did not match, please check function get_all_file_names."
-
-    # return file_names[:top_k]
     return file_names
 
 
@@ -382,37 +361,48 @@ def load_pdf(file_path):
 
 def prepare_file_for_chat(all_records_identifiers, file_names, token, progress=gr.Progress()):
     """Parse file and prepare RAG."""
+    if not all_records_identifiers:
+        raise gr.Error("No records available")
+    
+    if not file_names:
+        raise gr.Error("Please wait for files to load")
 
     documents = []
-    for record_id in all_records_identifiers:
-        if not file_names:
-            raise gr.Error("No file selected")
-        progress(0, desc="Starting")
-        # Create connection to kadi
+    progress(0, desc="Starting")
+    
+    try:
         manager = KadiManager(instance=instance, host=host, pat=token)
-        record = manager.record(identifier=record_id)
-        progress(0.2, desc="Loading files...")
-        # Parse files
-        # Download
-        for file_name in file_names:
-            file_id = record.get_file_id(file_name)
-            with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
-                print(temp_dir)
-                temp_file_location = os.path.join(temp_dir, file_name)
-                record.download_file(file_id, temp_file_location)
-                # parse document
-                docs = load_and_chunk_pdf(temp_file_location)
-                documents.extend(docs)
+        
+        for record_id in all_records_identifiers:
+            record = manager.record(identifier=record_id)
+            progress(0.2, desc="Loading files...")
+            
+            for file_name in file_names:
+                try:
+                    file_id = record.get_file_id(file_name)
+                    with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
+                        temp_file_location = os.path.join(temp_dir, file_name)
+                        record.download_file(file_id, temp_file_location)
+                        docs = load_and_chunk_pdf(temp_file_location)
+                        documents.extend(docs)
+                except Exception as e:
+                    print(f"Error processing file {file_name}: {str(e)}")
+                    continue
 
-    progress(0.4, desc="Embedding documents...")
-    user_rag = SimpleRAG()
-    user_rag.documents = documents
-    user_rag.embeddings_model = embeddings_model
-    user_rag.build_vector_db()
-    # print(documents[:2])
-    print("user rag created")
-    progress(1, desc="ready to chat")
-    return "ready to chat", user_rag
+        if not documents:
+            raise gr.Error("No documents could be processed")
+
+        progress(0.4, desc="Embedding documents...")
+        user_rag = SimpleRAG()
+        user_rag.documents = documents
+        user_rag.embeddings_model = embeddings_model
+        user_rag.build_vector_db()
+        
+        progress(1, desc="Ready to chat")
+        return "Ready to chat!", user_rag
+
+    except Exception as e:
+        raise gr.Error(f"Error preparing chat: {str(e)}")
 
 
 def preprocess_response(response: str) -> str:
