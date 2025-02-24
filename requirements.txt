@@ -18,8 +18,10 @@ sentence-transformers
 # Vector Database
 faiss-cpu
 
-# PDF Processing
+# Document Processing
 PyMuPDF
+python-docx
+markdown
 
 # Data Processing
 numpy
