@@ -538,7 +538,11 @@ def preprocess_response(response: str) -> str:
 
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
-    """Enhanced response generation with better prompting."""
+    """Enhanced response generation with better conversation handling."""
+    
+    # Add a disclaimer if topic seems to change dramatically
+    if history and is_topic_change(message, history[-1][0]):
+        return history, "Notice: It seems like you're changing topics. For best results, please use the 'Refresh Chat' button when starting a new topic.\n\n" + response
     
     # Get relevant documents
     retrieved_docs = user_session_rag.search_documents(message)
@@ -595,6 +599,18 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     
     history.append((message, polished_response))
     return history, ""
+
+
+def is_topic_change(current_msg: str, previous_msg: str) -> bool:
+    """Simple topic change detection"""
+    current_tokens = set(current_msg.lower().split())
+    previous_tokens = set(previous_msg.lower().split())
+    
+    # Calculate similarity between messages
+    overlap = len(current_tokens.intersection(previous_tokens))
+    similarity = overlap / (len(current_tokens) + len(previous_tokens))
+    
+    return similarity < 0.1  # Threshold for topic change detection
 
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
