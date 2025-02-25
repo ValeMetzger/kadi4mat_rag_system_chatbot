@@ -523,12 +523,12 @@ app = gr.mount_gradio_app(app, login_demo, path="/main")
 
 # Gradio interface
 with gr.Blocks() as main_demo:
-
-    # State for storing user token
+    # State variables
     _state_user_token = gr.State([])
-
-    # State for user rag
     user_session_rag = gr.State("placeholder")
+    record_list = gr.State([])  # Using gr.State to store the records
+    record_file_dropdown = gr.State([])  # Using gr.State to store the files
+    file_record_mapping = gr.State({})  # New state for file-record mapping
 
     with gr.Row():
         with gr.Column(scale=7):
@@ -550,10 +550,6 @@ with gr.Blocks() as main_demo:
                 message_box = gr.Textbox(
                     label="Chat Status", value="", interactive=False
                 )
-
-                # Change these from lists to Gradio components
-                record_list = gr.State([])  # Using gr.State to store the records
-                record_file_dropdown = gr.State([])  # Using gr.State to store the files
 
                 # Initialize user token and get records list
                 main_demo.load(_init_user_token, None, _state_user_token)
