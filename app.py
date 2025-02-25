@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from docx import Document
 import magic  # for file type detection
 import chardet  # for text encoding detection
+import pandas as pd
 
 # Kadi OAuth settings
 load_dotenv()
@@ -387,9 +388,31 @@ def get_file_type(file_path):
     file_type = mime.from_file(file_path)
     return file_type
 
+def extract_text_from_csv(file_path):
+    """Extract text from CSV files."""
+    try:
+        # Read the CSV file
+        df = pd.read_csv(file_path)
+        
+        # Convert DataFrame to string representation
+        # Include column names as headers
+        text = df.to_string(index=False)
+        
+        # Add some formatting to make it more readable
+        text = f"CSV Contents:\n{text}"
+        
+        return text
+    except Exception as e:
+        print(f"Error processing CSV file: {e}")
+        return None
+
 def extract_text_from_file(file_path):
     """Extract text from various file types."""
     file_type = get_file_type(file_path)
+    
+    # CSV files (check extension as mime type might be text/plain)
+    if file_path.lower().endswith('.csv'):
+        return extract_text_from_csv(file_path)
     
     # PDF files
     if file_type == "application/pdf":
@@ -478,7 +501,7 @@ def prepare_file_for_chat(all_records_identifiers, file_names, token, progress=g
 
     # Define supported file extensions
     supported_extensions = {
-        '.pdf', '.doc', '.docx', '.md', '.txt',
+        '.pdf', '.doc', '.docx', '.md', '.txt', '.csv',
         '.py', '.js', '.java', '.cpp', '.c',
         '.h', '.cs', '.rb', '.php', '.go',
         '.rs', '.swift', '.kt', '.ts', '.html',

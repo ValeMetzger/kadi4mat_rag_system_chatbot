@@ -33,3 +33,8 @@ kadi-apy
 # Optional but recommended
 flash-attention  # For improved transformer performance
 bitsandbytes    # For model quantization
+
+# File Type Detection and Processing
+python-magic-bin  # Use python-magic for Linux/Mac
+pandas
+chardet
