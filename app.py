@@ -149,13 +149,12 @@ def greet(request: gr.Request):
 def get_files_in_record(all_records_identifiers, user_token, progress=gr.Progress()):
     """Get all file list within one record."""
     if not all_records_identifiers:
-        return [], "No records found", {}
+        return [], "No records found"
 
     progress(0, desc="Connecting to Kadi...")
     manager = KadiManager(instance=instance, host=host, pat=user_token)
 
     file_names = []
-    file_record_mapping = {}
     total_records = len(all_records_identifiers)
     
     for idx, record_id in enumerate(all_records_identifiers):
@@ -165,9 +164,7 @@ def get_files_in_record(all_records_identifiers, user_token, progress=gr.Progres
         try:
             record = manager.record(identifier=record_id)
             file_list = record.get_filelist().json()
-            for file_info in file_list["items"]:
-                file_names.append(file_info["name"])
-                file_record_mapping[file_info["name"]] = record_id
+            file_names.extend([info["name"] for info in file_list["items"]])
         except kadi_apy.lib.exceptions.KadiAPYInputError as e:
             raise gr.Error(e)
 
@@ -180,12 +177,15 @@ def get_files_in_record(all_records_identifiers, user_token, progress=gr.Progres
         for p in range(1, page_num + 1):
             sub_progress = progress_val + ((p/page_num) * (1/total_records))
             progress(sub_progress, desc=f"Loading files from record {idx + 1}, page {p} of {page_num}...")
-            for file_info in record.get_filelist(page=p, per_page=per_page).json()["items"]:
-                file_names.append(file_info["name"])
-                file_record_mapping[file_info["name"]] = record_id
+            file_names.extend(
+                [
+                    info["name"]
+                    for info in record.get_filelist(page=p, per_page=per_page).json()["items"]
+                ]
+            )
 
     progress(1.0, desc="Files loaded!")
-    return file_names, f"Found {len(file_names)} files", file_record_mapping
+    return file_names, f"Found {len(file_names)} files"
 
 
 def get_all_records(user_token, progress=gr.Progress()):
@@ -407,7 +407,7 @@ def load_pdf(file_path):
     return documents
 
 
-def prepare_file_for_chat(all_records_identifiers, file_names, token, file_record_mapping, progress=gr.Progress()):
+def prepare_file_for_chat(all_records_identifiers, file_names, token, progress=gr.Progress()):
     """Parse file and prepare RAG."""
     if not all_records_identifiers:
         raise gr.Error("No records found")
@@ -416,6 +416,7 @@ def prepare_file_for_chat(all_records_identifiers, file_names, token, file_recor
         raise gr.Error("No files found in the selected records")
 
     documents = []
+    total_records = len(all_records_identifiers)
     total_files = len(file_names)
     
     for fidx, file_name in enumerate(file_names):
@@ -424,26 +425,30 @@ def prepare_file_for_chat(all_records_identifiers, file_names, token, file_recor
             print(f"Skipping non-PDF file: {file_name}")
             continue
             
+        file_found = False
         current_progress = 0.1 + (0.4 * (fidx/total_files))
-        progress(current_progress, desc=f"Processing {file_name}")
         
-        # Get the record ID directly from the mapping
-        record_id = file_record_mapping.get(file_name)
-        if record_id:
+        # Try each record until we find the file
+        for idx, record_id in enumerate(all_records_identifiers):
+            progress(current_progress, desc=f"Looking for {file_name} in record {idx + 1} of {total_records}")
             manager = KadiManager(instance=instance, host=host, pat=token)
             record = manager.record(identifier=record_id)
             
             try:
                 file_id = record.get_file_id(file_name)
+                # If we get here, the file was found
                 with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
                     temp_file_location = os.path.join(temp_dir, file_name)
                     record.download_file(file_id, temp_file_location)
                     docs = load_and_chunk_pdf(temp_file_location)
                     documents.extend(docs)
-            except kadi_apy.lib.exceptions.KadiAPYInputError as e:
-                print(f"Error processing file {file_name}: {e}")
-        else:
-            print(f"Warning: No record mapping found for file {file_name}")
+                file_found = True
+                break
+            except kadi_apy.lib.exceptions.KadiAPYInputError:
+                continue  # File not found in this record, try next one
+        
+        if not file_found:
+            print(f"Warning: File {file_name} was not found in any record")
 
     if not documents:
         raise gr.Error("No PDF documents could be processed")
@@ -523,12 +528,12 @@ app = gr.mount_gradio_app(app, login_demo, path="/main")
 
 # Gradio interface
 with gr.Blocks() as main_demo:
-    # State variables
+
+    # State for storing user token
     _state_user_token = gr.State([])
+
+    # State for user rag
     user_session_rag = gr.State("placeholder")
-    record_list = gr.State([])  # Using gr.State to store the records
-    record_file_dropdown = gr.State([])  # Using gr.State to store the files
-    file_record_mapping = gr.State({})  # New state for file-record mapping
 
     with gr.Row():
         with gr.Column(scale=7):
@@ -551,6 +556,10 @@ with gr.Blocks() as main_demo:
                     label="Chat Status", value="", interactive=False
                 )
 
+                # Change these from lists to Gradio components
+                record_list = gr.State([])  # Using gr.State to store the records
+                record_file_dropdown = gr.State([])  # Using gr.State to store the files
+
                 # Initialize user token and get records list
                 main_demo.load(_init_user_token, None, _state_user_token)
 
@@ -562,10 +571,10 @@ with gr.Blocks() as main_demo:
                 ).success(
                     fn=get_files_in_record,
                     inputs=[record_list, _state_user_token],
-                    outputs=[record_file_dropdown, status_box, file_record_mapping]
+                    outputs=[record_file_dropdown, status_box]
                 ).success(
                     fn=prepare_file_for_chat,
-                    inputs=[record_list, record_file_dropdown, _state_user_token, file_record_mapping],
+                    inputs=[record_list, record_file_dropdown, _state_user_token],
                     outputs=[message_box, user_session_rag]
                 )
 
