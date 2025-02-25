@@ -621,12 +621,14 @@ app = gr.mount_gradio_app(app, login_demo, path="/main")
 
 # Gradio interface
 with gr.Blocks() as main_demo:
-
     # State for storing user token
     _state_user_token = gr.State([])
 
     # State for user rag
     user_session_rag = gr.State("placeholder")
+
+    # Add this line to define the file mapping state
+    file_mapping = gr.State({})
 
     with gr.Row():
         with gr.Column(scale=7):
