@@ -35,6 +35,6 @@ flash-attention  # For improved transformer performance
 bitsandbytes    # For model quantization
 
 # File Type Detection and Processing
-python-magic-bin  # Use python-magic for Linux/Mac
+python-magic; platform_system != "Windows"  # For Linux/Mac
 pandas
 chardet
