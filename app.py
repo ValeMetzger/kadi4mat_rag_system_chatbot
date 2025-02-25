@@ -18,10 +18,6 @@ from requests.compat import urljoin
 from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
-from docx import Document
-import magic  # for file type detection
-import chardet  # for text encoding detection
-import pandas as pd
 
 # Kadi OAuth settings
 load_dotenv()
@@ -153,13 +149,13 @@ def greet(request: gr.Request):
 def get_files_in_record(all_records_identifiers, user_token, progress=gr.Progress()):
     """Get all file list within one record."""
     if not all_records_identifiers:
-        return [], "No records found", {}  # Added empty dict for file mapping
+        return [], "No records found", {}
 
     progress(0, desc="Connecting to Kadi...")
     manager = KadiManager(instance=instance, host=host, pat=user_token)
 
     file_names = []
-    file_record_mapping = {}  # New mapping dictionary
+    file_record_mapping = {}
     total_records = len(all_records_identifiers)
     
     for idx, record_id in enumerate(all_records_identifiers):
@@ -169,7 +165,6 @@ def get_files_in_record(all_records_identifiers, user_token, progress=gr.Progres
         try:
             record = manager.record(identifier=record_id)
             file_list = record.get_filelist().json()
-            # Store mapping of filename to record_id
             for file_info in file_list["items"]:
                 file_names.append(file_info["name"])
                 file_record_mapping[file_info["name"]] = record_id
@@ -383,86 +378,6 @@ def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"
     return chunks
 
 
-def get_file_type(file_path):
-    """Detect file type using python-magic."""
-    mime = magic.Magic(mime=True)
-    file_type = mime.from_file(file_path)
-    return file_type
-
-def extract_text_from_csv(file_path):
-    """Extract text from CSV files."""
-    try:
-        # Read the CSV file
-        df = pd.read_csv(file_path)
-        
-        # Convert DataFrame to string representation
-        # Include column names as headers
-        text = df.to_string(index=False)
-        
-        # Add some formatting to make it more readable
-        text = f"CSV Contents:\n{text}"
-        
-        return text
-    except Exception as e:
-        print(f"Error processing CSV file: {e}")
-        return None
-
-def extract_text_from_file(file_path):
-    """Extract text from various file types."""
-    file_type = get_file_type(file_path)
-    
-    # CSV files (check extension as mime type might be text/plain)
-    if file_path.lower().endswith('.csv'):
-        return extract_text_from_csv(file_path)
-    
-    # PDF files
-    if file_type == "application/pdf":
-        return extract_text_from_pdf(file_path)
-    
-    # Word documents
-    elif file_type in ["application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"]:
-        return extract_text_from_docx(file_path)
-    
-    # Text files (including markdown, source code, etc.)
-    elif file_type.startswith("text/"):
-        return extract_text_from_text_file(file_path)
-    
-    else:
-        print(f"Unsupported file type: {file_type}")
-        return None
-
-def extract_text_from_pdf(file_path):
-    """Extract text from PDF files."""
-    with pymupdf.open(file_path) as pdf:
-        text = ""
-        for page in pdf:
-            text += page.get_text()
-        return text
-
-def extract_text_from_docx(file_path):
-    """Extract text from Word documents."""
-    doc = Document(file_path)
-    text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
-    return text
-
-def extract_text_from_text_file(file_path):
-    """Extract text from text files with encoding detection."""
-    # Detect the file encoding
-    with open(file_path, 'rb') as file:
-        raw_data = file.read()
-        result = chardet.detect(raw_data)
-        encoding = result['encoding']
-    
-    # Read the file with the detected encoding
-    try:
-        with open(file_path, 'r', encoding=encoding) as file:
-            return file.read()
-    except UnicodeDecodeError:
-        # Fallback to utf-8 if detection fails
-        with open(file_path, 'r', encoding='utf-8') as file:
-            return file.read()
-
-
 def load_and_chunk_pdf(file_path):
     """Extracts text from a PDF file and stores it in the property documents by chunks."""
 
@@ -500,24 +415,13 @@ def prepare_file_for_chat(all_records_identifiers, file_names, token, file_recor
     if not file_names:
         raise gr.Error("No files found in the selected records")
 
-    # Define supported file extensions
-    supported_extensions = {
-        '.pdf', '.doc', '.docx', '.md', '.txt', '.csv',
-        '.py', '.js', '.java', '.cpp', '.c',
-        '.h', '.cs', '.rb', '.php', '.go',
-        '.rs', '.swift', '.kt', '.ts', '.html',
-        '.css', '.sql', '.r', '.m', '.sh'
-    }
-
     documents = []
     total_files = len(file_names)
-    manager = KadiManager(instance=instance, host=host, pat=token)
     
     for fidx, file_name in enumerate(file_names):
-        # Check if file extension is supported
-        file_ext = os.path.splitext(file_name.lower())[1]
-        if file_ext not in supported_extensions:
-            print(f"Skipping unsupported file: {file_name}")
+        # Skip non-PDF files
+        if not file_name.lower().endswith('.pdf'):
+            print(f"Skipping non-PDF file: {file_name}")
             continue
             
         current_progress = 0.1 + (0.4 * (fidx/total_files))
@@ -526,25 +430,23 @@ def prepare_file_for_chat(all_records_identifiers, file_names, token, file_recor
         # Get the record ID directly from the mapping
         record_id = file_record_mapping.get(file_name)
         if record_id:
+            manager = KadiManager(instance=instance, host=host, pat=token)
             record = manager.record(identifier=record_id)
+            
             try:
                 file_id = record.get_file_id(file_name)
                 with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
                     temp_file_location = os.path.join(temp_dir, file_name)
                     record.download_file(file_id, temp_file_location)
-                    
-                    # Extract text based on file type
-                    text = extract_text_from_file(temp_file_location)
-                    if text:
-                        chunks = chunk_text(text)
-                        documents.extend([{"content": chunk, "metadata": {"filename": file_name}} for chunk in chunks])
+                    docs = load_and_chunk_pdf(temp_file_location)
+                    documents.extend(docs)
             except kadi_apy.lib.exceptions.KadiAPYInputError as e:
                 print(f"Error processing file {file_name}: {e}")
         else:
             print(f"Warning: No record mapping found for file {file_name}")
 
     if not documents:
-        raise gr.Error("No documents could be processed")
+        raise gr.Error("No PDF documents could be processed")
 
     progress(0.5, desc="Initializing embeddings model...")
     user_rag = SimpleRAG()
@@ -621,14 +523,12 @@ app = gr.mount_gradio_app(app, login_demo, path="/main")
 
 # Gradio interface
 with gr.Blocks() as main_demo:
+
     # State for storing user token
     _state_user_token = gr.State([])
 
     # State for user rag
     user_session_rag = gr.State("placeholder")
-
-    # Add this line to define the file mapping state
-    file_mapping = gr.State({})
 
     with gr.Row():
         with gr.Column(scale=7):
@@ -666,10 +566,10 @@ with gr.Blocks() as main_demo:
                 ).success(
                     fn=get_files_in_record,
                     inputs=[record_list, _state_user_token],
-                    outputs=[record_file_dropdown, status_box, file_mapping]  # Add file_mapping output
+                    outputs=[record_file_dropdown, status_box, file_record_mapping]
                 ).success(
                     fn=prepare_file_for_chat,
-                    inputs=[record_list, record_file_dropdown, _state_user_token, file_mapping],  # Add file_mapping input
+                    inputs=[record_list, record_file_dropdown, _state_user_token, file_record_mapping],
                     outputs=[message_box, user_session_rag]
                 )
 
