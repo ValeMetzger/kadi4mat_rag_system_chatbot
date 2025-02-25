@@ -18,6 +18,9 @@ from requests.compat import urljoin
 from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
+from docx import Document
+import magic  # for file type detection
+import chardet  # for text encoding detection
 
 # Kadi OAuth settings
 load_dotenv()
@@ -378,6 +381,64 @@ def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"
     return chunks
 
 
+def get_file_type(file_path):
+    """Detect file type using python-magic."""
+    mime = magic.Magic(mime=True)
+    file_type = mime.from_file(file_path)
+    return file_type
+
+def extract_text_from_file(file_path):
+    """Extract text from various file types."""
+    file_type = get_file_type(file_path)
+    
+    # PDF files
+    if file_type == "application/pdf":
+        return extract_text_from_pdf(file_path)
+    
+    # Word documents
+    elif file_type in ["application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"]:
+        return extract_text_from_docx(file_path)
+    
+    # Text files (including markdown, source code, etc.)
+    elif file_type.startswith("text/"):
+        return extract_text_from_text_file(file_path)
+    
+    else:
+        print(f"Unsupported file type: {file_type}")
+        return None
+
+def extract_text_from_pdf(file_path):
+    """Extract text from PDF files."""
+    with pymupdf.open(file_path) as pdf:
+        text = ""
+        for page in pdf:
+            text += page.get_text()
+        return text
+
+def extract_text_from_docx(file_path):
+    """Extract text from Word documents."""
+    doc = Document(file_path)
+    text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+    return text
+
+def extract_text_from_text_file(file_path):
+    """Extract text from text files with encoding detection."""
+    # Detect the file encoding
+    with open(file_path, 'rb') as file:
+        raw_data = file.read()
+        result = chardet.detect(raw_data)
+        encoding = result['encoding']
+    
+    # Read the file with the detected encoding
+    try:
+        with open(file_path, 'r', encoding=encoding) as file:
+            return file.read()
+    except UnicodeDecodeError:
+        # Fallback to utf-8 if detection fails
+        with open(file_path, 'r', encoding='utf-8') as file:
+            return file.read()
+
+
 def load_and_chunk_pdf(file_path):
     """Extracts text from a PDF file and stores it in the property documents by chunks."""
 
@@ -415,14 +476,24 @@ def prepare_file_for_chat(all_records_identifiers, file_names, token, progress=g
     if not file_names:
         raise gr.Error("No files found in the selected records")
 
+    # Define supported file extensions
+    supported_extensions = {
+        '.pdf', '.doc', '.docx', '.md', '.txt',
+        '.py', '.js', '.java', '.cpp', '.c',
+        '.h', '.cs', '.rb', '.php', '.go',
+        '.rs', '.swift', '.kt', '.ts', '.html',
+        '.css', '.sql', '.r', '.m', '.sh'
+    }
+
     documents = []
     total_records = len(all_records_identifiers)
     total_files = len(file_names)
     
     for fidx, file_name in enumerate(file_names):
-        # Skip non-PDF files
-        if not file_name.lower().endswith('.pdf'):
-            print(f"Skipping non-PDF file: {file_name}")
+        # Check if file extension is supported
+        file_ext = os.path.splitext(file_name.lower())[1]
+        if file_ext not in supported_extensions:
+            print(f"Skipping unsupported file: {file_name}")
             continue
             
         file_found = False
@@ -436,22 +507,26 @@ def prepare_file_for_chat(all_records_identifiers, file_names, token, progress=g
             
             try:
                 file_id = record.get_file_id(file_name)
-                # If we get here, the file was found
                 with tempfile.TemporaryDirectory(prefix="tmp-kadichat-downloads-") as temp_dir:
                     temp_file_location = os.path.join(temp_dir, file_name)
                     record.download_file(file_id, temp_file_location)
-                    docs = load_and_chunk_pdf(temp_file_location)
-                    documents.extend(docs)
+                    
+                    # Extract text based on file type
+                    text = extract_text_from_file(temp_file_location)
+                    if text:
+                        chunks = chunk_text(text)
+                        documents.extend([{"content": chunk, "metadata": {"filename": file_name}} for chunk in chunks])
+                    
                 file_found = True
                 break
             except kadi_apy.lib.exceptions.KadiAPYInputError:
-                continue  # File not found in this record, try next one
-        
+                continue
+
         if not file_found:
             print(f"Warning: File {file_name} was not found in any record")
 
     if not documents:
-        raise gr.Error("No PDF documents could be processed")
+        raise gr.Error("No documents could be processed")
 
     progress(0.5, desc="Initializing embeddings model...")
     user_rag = SimpleRAG()
