@@ -293,7 +293,7 @@ class SimpleRAG:
         # print("PDF processed successfully!")
 
     def build_vector_db(self) -> None:
-        """Builds a vector database using the content of the PDF."""
+        """Builds a vector database using the content of the documents."""
         if self.embeddings_model is None:
             self.embeddings_model = SentenceTransformer(
                 "sentence-transformers/all-mpnet-base-v2", trust_remote_code=True
@@ -301,53 +301,85 @@ class SimpleRAG:
 
         print("Getting document embeddings...")
         
+        # Check if there are documents to process
+        if not self.documents:
+            print("No documents to process.")
+            return
+        
         # Process documents in batches
         batch_size = 32  # Adjust based on your memory constraints
         num_documents = len(self.documents)
         all_embeddings = []
         
-        for i in range(0, num_documents, batch_size):
-            batch_docs = [doc["content"] for doc in self.documents[i:i + batch_size]]
-            print(f"Processing batch {i//batch_size + 1} of {(num_documents + batch_size - 1)//batch_size}")
+        try:
+            for i in range(0, num_documents, batch_size):
+                batch_docs = [doc["content"] for doc in self.documents[i:i + batch_size]]
+                print(f"Processing batch {i//batch_size + 1} of {(num_documents + batch_size - 1)//batch_size}")
+                
+                # Filter out empty documents
+                batch_docs = [doc for doc in batch_docs if doc.strip()]
+                if not batch_docs:
+                    print(f"Skipping batch {i//batch_size + 1} - all documents are empty")
+                    continue
+                
+                # Use local model instead of API for faster processing
+                embeddings = self.embeddings_model.encode(
+                    batch_docs,
+                    convert_to_numpy=True,
+                    show_progress_bar=True
+                )
+                all_embeddings.append(embeddings)
             
-            # Use local model instead of API for faster processing
-            embeddings = self.embeddings_model.encode(
-                batch_docs,
-                convert_to_numpy=True,
-                show_progress_bar=True
-            )
-            all_embeddings.append(embeddings)
-        
-        # Combine all batches
-        self.embeddings = np.vstack(all_embeddings)
-        
-        # Build the FAISS index
-        print("Building FAISS index...")
-        self.index = faiss.IndexFlatL2(self.embeddings.shape[1])
-        self.index.add(self.embeddings)
-        print(f"Vector database built successfully! Index dimension: {self.index.d}")
+            if not all_embeddings:
+                print("No valid embeddings generated.")
+                return
+            
+            # Combine all batches
+            self.embeddings = np.vstack(all_embeddings)
+            
+            # Build the FAISS index
+            print("Building FAISS index...")
+            self.index = faiss.IndexFlatL2(self.embeddings.shape[1])
+            self.index.add(self.embeddings)
+            print(f"Vector database built successfully! Index dimension: {self.index.d}, with {self.index.ntotal} vectors")
+        except Exception as e:
+            print(f"Error building vector database: {e}")
 
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
         
-        print("Getting query embedding...")
-        # Use local model for consistency with build_vector_db
-        query_embedding = self.embeddings_model.encode(
-            [query],
-            convert_to_numpy=True,
-            show_progress_bar=False
-        )
+        if not self.documents or not self.index:
+            return ["No documents have been processed yet."]
         
-        print(f"Query embedding shape: {query_embedding.shape}")
-        print(f"Index dimension: {self.index.d}")
-        
-        # Ensure dimensions match
-        if query_embedding.shape[1] != self.index.d:
-            raise ValueError(f"Embedding dimension {query_embedding.shape[1]} does not match index dimension {self.index.d}")
-        
-        D, I = self.index.search(query_embedding, k)
-        results = [self.documents[i]["content"] for i in I[0]]
-        return results if results else ["No relevant documents found."]
+        try:
+            print("Getting query embedding...")
+            # Use local model for consistency with build_vector_db
+            query_embedding = self.embeddings_model.encode(
+                [query],
+                convert_to_numpy=True,
+                show_progress_bar=False
+            )
+            
+            print(f"Query embedding shape: {query_embedding.shape}")
+            print(f"Index dimension: {self.index.d}")
+            
+            # Ensure dimensions match
+            if query_embedding.shape[1] != self.index.d:
+                print(f"WARNING: Embedding dimension mismatch: {query_embedding.shape[1]} vs {self.index.d}")
+                return ["Error: Embedding dimension mismatch. Please rebuild the vector database."]
+            
+            D, I = self.index.search(query_embedding, k)
+            
+            # Check if any valid indices were returned
+            valid_indices = [i for i in I[0] if 0 <= i < len(self.documents)]
+            if not valid_indices:
+                return ["No relevant documents found."]
+            
+            results = [self.documents[i]["content"] for i in valid_indices]
+            return results
+        except Exception as e:
+            print(f"Error during document search: {e}")
+            return [f"Error searching documents: {str(e)}"]
 
 
 def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
@@ -380,17 +412,26 @@ def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"
 
 def load_and_chunk_pdf(file_path):
     """Extracts text from a PDF file and chunks it."""
-    with pymupdf.open(file_path) as pdf:
-        text = ""
-        for page in pdf:
-            text += page.get_text()
+    try:
+        with pymupdf.open(file_path) as pdf:
+            text = ""
+            for page in pdf:
+                text += page.get_text()
 
-        chunks = chunk_text(text)
-        documents = []
-        for chunk in chunks:
-            documents.append({"content": chunk, "metadata": pdf.metadata})
+            if not text.strip():
+                return [{"content": "The PDF appears to be empty or contains no extractable text.", 
+                         "metadata": {"type": "pdf", "status": "empty"}}]
 
-        return documents
+            chunks = chunk_text(text)
+            documents = []
+            for chunk in chunks:
+                documents.append({"content": chunk, "metadata": {"type": "pdf"}})
+
+            return documents
+    except Exception as e:
+        print(f"Error processing PDF {file_path}: {e}")
+        return [{"content": f"Error processing PDF: {str(e)}", 
+                 "metadata": {"type": "pdf", "status": "error"}}]
 
 
 def load_text_file(file_path):
@@ -406,14 +447,53 @@ def load_text_file(file_path):
 
 def load_docx(file_path):
     """Extracts text from docx files and chunks it."""
-    import docx
-    doc = docx.Document(file_path)
-    text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
-    chunks = chunk_text(text)
-    documents = []
-    for chunk in chunks:
-        documents.append({"content": chunk, "metadata": {"type": "docx"}})
-    return documents
+    try:
+        import docx
+        doc = docx.Document(file_path)
+        text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+        
+        if not text.strip():
+            return [{"content": "The DOCX file appears to be empty or contains no text.", 
+                     "metadata": {"type": "docx", "status": "empty"}}]
+        
+        chunks = chunk_text(text)
+        documents = []
+        for chunk in chunks:
+            documents.append({"content": chunk, "metadata": {"type": "docx"}})
+        return documents
+    except ImportError:
+        print("python-docx package is not installed. Cannot process DOCX files.")
+        return [{"content": "DOCX processing is not available. Please install python-docx package.", 
+                 "metadata": {"type": "docx", "status": "error"}}]
+    except Exception as e:
+        print(f"Error processing DOCX {file_path}: {e}")
+        return [{"content": f"Error processing DOCX: {str(e)}", 
+                 "metadata": {"type": "docx", "status": "error"}}]
+
+
+def load_csv_file(file_path):
+    """Extracts text from CSV files with special handling."""
+    try:
+        import csv
+        with open(file_path, 'r', encoding='utf-8') as file:
+            reader = csv.reader(file)
+            rows = list(reader)
+            
+            if not rows:
+                return [{"content": "The CSV file appears to be empty.", 
+                         "metadata": {"type": "csv", "status": "empty"}}]
+            
+            # Convert CSV to a more readable format
+            text = "\n".join([", ".join(row) for row in rows])
+            chunks = chunk_text(text)
+            documents = []
+            for chunk in chunks:
+                documents.append({"content": chunk, "metadata": {"type": "csv"}})
+            return documents
+    except Exception as e:
+        print(f"Error processing CSV {file_path}: {e}")
+        return [{"content": f"Error processing CSV: {str(e)}", 
+                 "metadata": {"type": "csv", "status": "error"}}]
 
 
 def prepare_file_for_chat(all_records_identifiers, file_names, token, file_record_mapping, progress=gr.Progress()):
@@ -428,12 +508,15 @@ def prepare_file_for_chat(all_records_identifiers, file_names, token, file_recor
     total_files = len(file_names)
     
     supported_extensions = {'.pdf', '.txt', '.md', '.csv', '.docx'}
+    skipped_files = []
+    processed_files = []
     
     for fidx, file_name in enumerate(file_names):
         file_ext = os.path.splitext(file_name.lower())[1]
         
         # Skip unsupported files
         if file_ext not in supported_extensions:
+            skipped_files.append(file_name)
             print(f"Skipping unsupported file: {file_name}")
             continue
             
@@ -457,7 +540,9 @@ def prepare_file_for_chat(all_records_identifiers, file_names, token, file_recor
                         docs = load_and_chunk_pdf(temp_file_location)
                     elif file_ext == '.docx':
                         docs = load_docx(temp_file_location)
-                    else:  # .txt, .md, .csv
+                    elif file_ext == '.csv':
+                        docs = load_csv_file(temp_file_location)
+                    else:  # .txt, .md
                         docs = load_text_file(temp_file_location)
                         
                     documents.extend(docs)
@@ -465,6 +550,16 @@ def prepare_file_for_chat(all_records_identifiers, file_names, token, file_recor
                 print(f"Error processing file {file_name}: {e}")
         else:
             print(f"Warning: No record mapping found for file {file_name}")
+
+        processed_files.append(file_name)
+
+    # Provide feedback about skipped files
+    if skipped_files:
+        message = f"Processed {len(processed_files)} files. Skipped {len(skipped_files)} unsupported files: {', '.join(skipped_files[:5])}"
+        if len(skipped_files) > 5:
+            message += f" and {len(skipped_files) - 5} more."
+    else:
+        message = f"Processed all {len(processed_files)} files successfully."
 
     if not documents:
         raise gr.Error("No documents could be processed")
@@ -478,7 +573,7 @@ def prepare_file_for_chat(all_records_identifiers, file_names, token, file_recor
     user_rag.build_vector_db()
     
     progress(1.0, desc="Ready to chat!")
-    return "Ready to chat! You can now ask questions about your documents.", user_rag
+    return message, user_rag
 
 
 def preprocess_response(response: str) -> str:
