@@ -18,7 +18,6 @@ from requests.compat import urljoin
 from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
-import time
 
 # Kadi OAuth settings
 load_dotenv()
@@ -279,7 +278,6 @@ class SimpleRAG:
         self.embeddings_model = None
         self.embeddings = None
         self.index = None
-        self.retrieval_metrics = []
         # self.load_pdf("Brandt et al_2024_Kadi_info_page.pdf")
         # self.build_vector_db()
 
@@ -350,8 +348,6 @@ class SimpleRAG:
     def search_documents(self, query: str, k: int = 4) -> List[str]:
         """Searches for relevant documents using vector similarity."""
         
-        start_time = time.time()
-        
         if not self.documents or not self.index:
             return ["No documents have been processed yet."]
         
@@ -380,25 +376,10 @@ class SimpleRAG:
                 return ["No relevant documents found."]
             
             results = [self.documents[i]["content"] for i in valid_indices]
-            
-            # Track retrieval metrics
-            retrieval_time = time.time() - start_time
-            self.retrieval_metrics.append({
-                "query": query,
-                "num_results": len(results),
-                "retrieval_time_ms": retrieval_time * 1000,
-                "distances": D[0].tolist() if len(D) > 0 else [],
-                "indices": I[0].tolist() if len(I) > 0 else []
-            })
-            
             return results
         except Exception as e:
             print(f"Error during document search: {e}")
             return [f"Error searching documents: {str(e)}"]
-
-    def get_retrieval_metrics(self):
-        """Returns the collected retrieval metrics."""
-        return self.retrieval_metrics
 
 
 def chunk_text(text, chunk_size=2048, overlap_size=256, separators=["\n\n", "\n"]):
@@ -610,11 +591,10 @@ def preprocess_response(response: str) -> str:
     return response
 
 
-def respond(message: str, history: List[Tuple[str, str]], user_session_rag, evaluate_mode=False, ground_truth=None):
-    """Get respond from LLMs with evaluation metrics."""
-    
-    start_time = time.time()
-    
+def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
+    """Get respond from LLMs."""
+
+    # message is the current input query from user
     # RAG
     retrieved_docs = user_session_rag.search_documents(message)
     context = "\n".join(retrieved_docs)
@@ -622,66 +602,15 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag, eval
         context
     )
     messages = [{"role": "assistant", "content": system_message}]
-    
-    # Add history for conversational chat
+
+    # Add history for conversational chat, TODO
+    # for val in history:
+    #     #if val[0]:
+    #     messages.append({"role": "user", "content": val[0]})
+    #     #if val[1]:
+    #     messages.append({"role": "assistant", "content": val[1]})
+
     messages.append({"role": "user", "content": f"\nQuestion: {message}"})
-    
-    # Get answer from LLM
-    response = client.chat_completion(
-        messages, max_tokens=2048, temperature=0.0
-    )
-    response_content = "".join(
-        [
-            choice.message["content"]
-            for choice in response.choices
-            if "content" in choice.message
-        ]
-    )
-    
-    # Process response
-    polished_response = preprocess_response(response_content)
-    
-    # Calculate metrics
-    end_time = time.time()
-    response_time = end_time - start_time
-    
-    # Estimate token count (rough approximation)
-    input_tokens = len(message.split()) + len(context.split())
-    output_tokens = len(polished_response.split())
-    
-    # Store metrics
-    metrics = {
-        "timestamp": datetime.now().isoformat(),
-        "query": message,
-        "response_time_seconds": response_time,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "num_retrieved_docs": len(retrieved_docs)
-    }
-    
-    evaluation_metrics["response_times"].append(response_time)
-    evaluation_metrics["token_counts"].append({"input": input_tokens, "output": output_tokens})
-    
-    # If in evaluation mode, check against ground truth
-    if evaluate_mode and ground_truth:
-        # Simple hallucination check - see if response contains information not in retrieved docs
-        hallucination_score = check_hallucination(polished_response, retrieved_docs, ground_truth)
-        metrics["hallucination_score"] = hallucination_score
-        evaluation_metrics["hallucination_checks"].append(hallucination_score)
-    
-    # Save metrics to file for later analysis
-    try:
-        with open("evaluation_metrics.jsonl", "a") as f:
-            f.write(json.dumps(metrics) + "\n")
-    except Exception as e:
-        print(f"Error saving metrics: {e}")
-    
-    history.append((message, polished_response))
-    
-    if evaluate_mode:
-        return history, "", metrics
-    else:
-        return history, ""
 
     # print("-----------------")
     # print(messages)
@@ -789,214 +718,7 @@ with gr.Blocks() as main_demo:
         )
         refresh_btn.click(lambda: [], None, chatbot)
 
-    with gr.Tab("Evaluation"):
-        with gr.Row():
-            with gr.Column(scale=7):
-                eval_chatbot = gr.Chatbot()
-            with gr.Column(scale=3):
-                gr.Markdown("### Evaluation Settings")
-                eval_query = gr.Textbox(label="Test Query")
-                ground_truth_docs = gr.Textbox(
-                    label="Ground Truth Document IDs (comma-separated)",
-                    placeholder="doc1,doc2,doc3"
-                )
-                key_facts = gr.Textbox(
-                    label="Key Facts (one per line)",
-                    placeholder="Fact 1\nFact 2\nFact 3",
-                    lines=5
-                )
-                run_eval_btn = gr.Button("Run Evaluation")
-                
-                eval_results = gr.JSON(label="Evaluation Results")
-                
-                export_metrics_btn = gr.Button("Export All Metrics")
-                metrics_output = gr.File(label="Exported Metrics")
-        
-        with gr.Row():
-            retrieval_metrics_chart = gr.Plot(label="Retrieval Performance")
-            response_time_chart = gr.Plot(label="Response Times")
-        
-        # Function to run evaluation
-        def run_evaluation(query, ground_truth_doc_ids, key_facts_text, history, user_rag):
-            # Parse ground truth inputs
-            doc_ids = [doc_id.strip() for doc_id in ground_truth_doc_ids.split(",") if doc_id.strip()]
-            facts = [fact.strip() for fact in key_facts_text.split("\n") if fact.strip()]
-            
-            ground_truth = {
-                "document_ids": doc_ids,
-                "key_facts": facts
-            }
-            
-            # Run response with evaluation
-            new_history, _, metrics = respond(
-                query, 
-                history if history else [], 
-                user_rag,
-                evaluate_mode=True,
-                ground_truth=ground_truth
-            )
-            
-            # Get retrieval metrics
-            retrieved_docs = user_rag.search_documents(query)
-            retrieval_quality = evaluate_retrieval_quality(query, retrieved_docs, doc_ids)
-            
-            # Combine metrics
-            combined_metrics = {**metrics, **retrieval_quality}
-            
-            # Generate charts
-            retrieval_chart = generate_retrieval_chart(user_rag.get_retrieval_metrics())
-            response_chart = generate_response_time_chart(evaluation_metrics["response_times"])
-            
-            return new_history, combined_metrics, retrieval_chart, response_chart
-        
-        # Function to export all metrics
-        def export_all_metrics():
-            metrics_file = "all_evaluation_metrics.json"
-            with open(metrics_file, "w") as f:
-                json.dump(evaluation_metrics, f, indent=2)
-            return metrics_file
-        
-        # Connect buttons to functions
-        run_eval_btn.click(
-            fn=run_evaluation,
-            inputs=[eval_query, ground_truth_docs, key_facts, eval_chatbot, user_session_rag],
-            outputs=[eval_chatbot, eval_results, retrieval_metrics_chart, response_time_chart]
-        )
-        
-        export_metrics_btn.click(
-            fn=export_all_metrics,
-            inputs=[],
-            outputs=[metrics_output]
-        )
-
-# Helper functions for visualization
-def generate_retrieval_chart(retrieval_metrics):
-    """Generate a chart showing retrieval performance metrics."""
-    import matplotlib.pyplot as plt
-    import numpy as np
-    
-    if not retrieval_metrics or len(retrieval_metrics) == 0:
-        fig, ax = plt.subplots()
-        ax.text(0.5, 0.5, "No retrieval data available", 
-                horizontalalignment='center', verticalalignment='center')
-        return fig
-    
-    # Extract data
-    queries = [m.get("query", "")[:20] + "..." for m in retrieval_metrics]
-    times = [m.get("retrieval_time_ms", 0) for m in retrieval_metrics]
-    num_results = [m.get("num_results", 0) for m in retrieval_metrics]
-    
-    # Create figure with two y-axes
-    fig, ax1 = plt.subplots(figsize=(10, 6))
-    
-    # Plot retrieval times
-    color = 'tab:blue'
-    ax1.set_xlabel('Queries')
-    ax1.set_ylabel('Retrieval Time (ms)', color=color)
-    ax1.bar(np.arange(len(queries)), times, color=color, alpha=0.7, label='Retrieval Time')
-    ax1.tick_params(axis='y', labelcolor=color)
-    
-    # Create second y-axis for number of results
-    ax2 = ax1.twinx()
-    color = 'tab:red'
-    ax2.set_ylabel('Number of Results', color=color)
-    ax2.plot(np.arange(len(queries)), num_results, color=color, marker='o', label='Number of Results')
-    ax2.tick_params(axis='y', labelcolor=color)
-    
-    # Set x-ticks
-    plt.xticks(np.arange(len(queries)), queries, rotation=45, ha='right')
-    
-    # Add title and adjust layout
-    plt.title('Retrieval Performance Metrics')
-    fig.tight_layout()
-    
-    return fig
-
-def generate_response_time_chart(response_times):
-    """Generate a chart showing response time trends."""
-    import matplotlib.pyplot as plt
-    import numpy as np
-    
-    if not response_times or len(response_times) == 0:
-        fig, ax = plt.subplots()
-        ax.text(0.5, 0.5, "No response time data available", 
-                horizontalalignment='center', verticalalignment='center')
-        return fig
-    
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Plot response times
-    ax.plot(np.arange(len(response_times)), response_times, marker='o', linestyle='-')
-    
-    # Add moving average if we have enough data points
-    if len(response_times) >= 3:
-        window_size = min(3, len(response_times))
-        moving_avg = np.convolve(response_times, np.ones(window_size)/window_size, mode='valid')
-        ax.plot(np.arange(len(moving_avg)) + window_size-1, moving_avg, 'r--', label=f'{window_size}-point Moving Average')
-    
-    # Add labels and title
-    ax.set_xlabel('Query Number')
-    ax.set_ylabel('Response Time (seconds)')
-    ax.set_title('Response Time Trend')
-    
-    # Add grid and legend
-    ax.grid(True, linestyle='--', alpha=0.7)
-    if len(response_times) >= 3:
-        ax.legend()
-    
-    return fig
-
 app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
-
-
-def evaluate_retrieval_quality(query, retrieved_docs, ground_truth_docs, progress=gr.Progress()):
-    """
-    Evaluates the quality of retrieved documents against ground truth.
-    
-    Args:
-        query: The user query
-        retrieved_docs: List of retrieved document chunks
-        ground_truth_docs: List of document IDs that should be retrieved
-        
-    Returns:
-        Dictionary with precision, recall, and F1 score
-    """
-    progress(0.1, desc="Evaluating retrieval quality...")
-    
-    # Extract document IDs from retrieved chunks (assuming metadata contains doc_id)
-    retrieved_ids = set()
-    for doc in retrieved_docs:
-        if isinstance(doc, dict) and "metadata" in doc:
-            if "doc_id" in doc["metadata"]:
-                retrieved_ids.add(doc["metadata"]["doc_id"])
-        elif isinstance(doc, str):
-            # Try to extract document ID from content if available
-            # This is a simplified approach - adjust based on your document structure
-            for gt_id in ground_truth_docs:
-                if gt_id in doc:
-                    retrieved_ids.add(gt_id)
-    
-    progress(0.5, desc="Calculating metrics...")
-    
-    # Calculate precision, recall, F1
-    ground_truth_set = set(ground_truth_docs)
-    
-    true_positives = len(retrieved_ids.intersection(ground_truth_set))
-    
-    precision = true_positives / len(retrieved_ids) if retrieved_ids else 0
-    recall = true_positives / len(ground_truth_set) if ground_truth_set else 0
-    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
-    
-    progress(1.0, desc="Evaluation complete!")
-    
-    return {
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "retrieved_count": len(retrieved_ids),
-        "ground_truth_count": len(ground_truth_set),
-        "true_positives": true_positives
-    }
 
 
 if __name__ == "__main__":
