@@ -18,6 +18,23 @@ from requests.compat import urljoin
 from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
+import time
+import logging
+from datetime import datetime
+
+# Konfiguriere Logger für Evaluation
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+eval_logger = logging.getLogger("rag_evaluation")
+
+# Globale Variable für Evaluationsdaten
+evaluation_data = {
+    "queries": [],
+    "start_time": datetime.now().isoformat()
+}
 
 # Kadi OAuth settings
 load_dotenv()
@@ -592,8 +609,9 @@ def preprocess_response(response: str) -> str:
 
 
 def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
-    """Get respond from LLMs."""
-
+    """Get respond from LLMs with evaluation metrics."""
+    start_time = time.time()
+    
     # message is the current input query from user
     # RAG
     retrieved_docs = user_session_rag.search_documents(message)
@@ -603,7 +621,7 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     )
     messages = [{"role": "assistant", "content": system_message}]
 
-    # Add history for conversational chat, TODO
+    # Add history for conversational chat
     # for val in history:
     #     #if val[0]:
     #     messages.append({"role": "user", "content": val[0]})
@@ -612,13 +630,10 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
 
     messages.append({"role": "user", "content": f"\nQuestion: {message}"})
 
-    # print("-----------------")
-    # print(messages)
-    # print("-----------------")
-    # Get anwser from LLM
+    # Get answer from LLM
     response = client.chat_completion(
         messages, max_tokens=2048, temperature=0.0
-    )  # , top_p=0.9)
+    )
     response_content = "".join(
         [
             choice.message["content"]
@@ -629,9 +644,55 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
 
     # Process response
     polished_response = preprocess_response(response_content)
+    
+    # Berechne Antwortzeit
+    end_time = time.time()
+    response_time = end_time - start_time
+    
+    # Erfasse Evaluationsdaten
+    query_data = {
+        "timestamp": datetime.now().isoformat(),
+        "query": message,
+        "num_chunks_retrieved": len(retrieved_docs),
+        "response_time_seconds": response_time,
+        "response_length": len(polished_response)
+    }
+    
+    # Füge zu Evaluationsdaten hinzu
+    evaluation_data["queries"].append(query_data)
+    
+    # Logge für Hugging Face
+    eval_logger.info(f"EVAL_QUERY: {json.dumps(query_data)}")
+    
+    # Logge regelmäßig eine Zusammenfassung
+    if len(evaluation_data["queries"]) % 5 == 0:  # Nach jeder 5. Anfrage
+        log_evaluation_summary()
 
     history.append((message, polished_response))
     return history, ""
+
+
+def log_evaluation_summary():
+    """Erstellt und loggt eine Zusammenfassung der Evaluationsmetriken"""
+    if not evaluation_data["queries"]:
+        return
+    
+    # Berechne Durchschnittswerte
+    response_times = [q["response_time_seconds"] for q in evaluation_data["queries"]]
+    chunks_retrieved = [q["num_chunks_retrieved"] for q in evaluation_data["queries"]]
+    
+    summary = {
+        "total_queries": len(evaluation_data["queries"]),
+        "avg_response_time": sum(response_times) / len(response_times) if response_times else 0,
+        "avg_chunks_retrieved": sum(chunks_retrieved) / len(chunks_retrieved) if chunks_retrieved else 0,
+        "min_response_time": min(response_times) if response_times else 0,
+        "max_response_time": max(response_times) if response_times else 0,
+        "evaluation_duration": (datetime.now() - datetime.fromisoformat(evaluation_data["start_time"])).total_seconds(),
+    }
+    
+    # Logge die Zusammenfassung
+    eval_logger.info(f"EVAL_SUMMARY: {json.dumps(summary)}")
+    return summary
 
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
@@ -718,8 +779,74 @@ with gr.Blocks() as main_demo:
         )
         refresh_btn.click(lambda: [], None, chatbot)
 
+        with gr.Row():
+            export_eval_btn = gr.Button("Export Evaluation Data")
+        
+        export_eval_btn.click(
+            fn=lambda: "Evaluation data exported to logs. Check the Hugging Face logs for EVAL_CSV_EXPORT.",
+            inputs=None,
+            outputs=message_box
+        )
+
 app = gr.mount_gradio_app(app, main_demo, path="/gradio", auth_dependency=get_user)
 
+# Füge einen Endpunkt hinzu, um die Evaluationsdaten abzurufen
+@app.get("/evaluation-data")
+async def get_evaluation_data():
+    """API-Endpunkt zum Abrufen der Evaluationsdaten"""
+    summary = log_evaluation_summary()
+    return {
+        "summary": summary,
+        "queries": evaluation_data["queries"]
+    }
 
+# Füge einen Endpunkt hinzu, um die Evaluationsdaten zurückzusetzen
+@app.get("/reset-evaluation")
+async def reset_evaluation():
+    """API-Endpunkt zum Zurücksetzen der Evaluationsdaten"""
+    global evaluation_data
+    evaluation_data = {
+        "queries": [],
+        "start_time": datetime.now().isoformat()
+    }
+    return {"status": "Evaluation data reset successfully"}
+
+# Füge einen Endpunkt hinzu, um die Evaluationsdaten als CSV zu exportieren
+@app.get("/export-evaluation-csv")
+async def export_evaluation_csv():
+    """API-Endpunkt zum Exportieren der Evaluationsdaten als CSV"""
+    if not evaluation_data["queries"]:
+        return {"error": "No evaluation data available"}
+    
+    import csv
+    from io import StringIO
+    
+    output = StringIO()
+    fieldnames = ["timestamp", "query", "num_chunks_retrieved", "response_time_seconds", "response_length"]
+    
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    
+    for query in evaluation_data["queries"]:
+        writer.writerow({field: query.get(field, "") for field in fieldnames})
+    
+    csv_content = output.getvalue()
+    
+    # Logge die CSV-Daten
+    eval_logger.info(f"EVAL_CSV_EXPORT: {csv_content}")
+    
+    return {"csv_data": csv_content}
+
+# Am Ende des Skripts, wenn die App beendet wird
 if __name__ == "__main__":
+    # Registriere einen Shutdown-Handler
+    import atexit
+    
+    def save_final_evaluation():
+        final_summary = log_evaluation_summary()
+        eval_logger.info(f"FINAL_EVALUATION: {json.dumps(evaluation_data)}")
+        eval_logger.info(f"Evaluation completed with {len(evaluation_data['queries'])} queries.")
+    
+    atexit.register(save_final_evaluation)
+    
     uvicorn.run(app, port=7860, host="0.0.0.0")
