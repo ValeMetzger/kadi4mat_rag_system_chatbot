@@ -22,11 +22,11 @@ import time
 import logging
 from datetime import datetime
 
-# Konfiguriere Logger für Evaluation
+# Konfiguriere Logger für Evaluation mit Konsolenausgabe
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler()]
+    handlers=[logging.StreamHandler()]  # Ausgabe in die Konsole
 )
 eval_logger = logging.getLogger("rag_evaluation")
 
@@ -612,25 +612,25 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     """Get respond from LLMs with evaluation metrics."""
     start_time = time.time()
     
-    # message is the current input query from user
+    # Logge den Start der Anfrage
+    print(f"\n==== PROCESSING QUERY: {message} ====")
+    
     # RAG
     retrieved_docs = user_session_rag.search_documents(message)
+    
+    # Logge die abgerufenen Dokumente
+    print(f"Retrieved {len(retrieved_docs)} documents")
+    
     context = "\n".join(retrieved_docs)
     system_message = "You are an assistant to help user to answer question related to Kadi based on Relevant documents.\nRelevant documents: {}".format(
         context
     )
     messages = [{"role": "assistant", "content": system_message}]
 
-    # Add history for conversational chat
-    # for val in history:
-    #     #if val[0]:
-    #     messages.append({"role": "user", "content": val[0]})
-    #     #if val[1]:
-    #     messages.append({"role": "assistant", "content": val[1]})
-
     messages.append({"role": "user", "content": f"\nQuestion: {message}"})
 
     # Get answer from LLM
+    print("Sending request to LLM...")
     response = client.chat_completion(
         messages, max_tokens=2048, temperature=0.0
     )
@@ -661,11 +661,19 @@ def respond(message: str, history: List[Tuple[str, str]], user_session_rag):
     # Füge zu Evaluationsdaten hinzu
     evaluation_data["queries"].append(query_data)
     
+    # Detaillierte Konsolenausgabe
+    print("\n==== QUERY EVALUATION METRICS ====")
+    print(f"Query: {message}")
+    print(f"Response time: {response_time:.2f} seconds")
+    print(f"Retrieved chunks: {len(retrieved_docs)}")
+    print(f"Response length: {len(polished_response)} characters")
+    print("==================================\n")
+    
     # Logge für Hugging Face
     eval_logger.info(f"EVAL_QUERY: {json.dumps(query_data)}")
     
     # Logge regelmäßig eine Zusammenfassung
-    if len(evaluation_data["queries"]) % 5 == 0:  # Nach jeder 5. Anfrage
+    if len(evaluation_data["queries"]) % 3 == 0:  # Nach jeder 3. Anfrage
         log_evaluation_summary()
 
     history.append((message, polished_response))
@@ -689,6 +697,16 @@ def log_evaluation_summary():
         "max_response_time": max(response_times) if response_times else 0,
         "evaluation_duration": (datetime.now() - datetime.fromisoformat(evaluation_data["start_time"])).total_seconds(),
     }
+    
+    # Ausführliche Konsolenausgabe
+    print("\n========== EVALUATION SUMMARY ==========")
+    print(f"Total queries: {summary['total_queries']}")
+    print(f"Average response time: {summary['avg_response_time']:.2f} seconds")
+    print(f"Min response time: {summary['min_response_time']:.2f} seconds")
+    print(f"Max response time: {summary['max_response_time']:.2f} seconds")
+    print(f"Average chunks retrieved: {summary['avg_chunks_retrieved']:.2f}")
+    print(f"Evaluation duration: {summary['evaluation_duration']:.2f} seconds")
+    print("=========================================\n")
     
     # Logge die Zusammenfassung
     eval_logger.info(f"EVAL_SUMMARY: {json.dumps(summary)}")
@@ -844,8 +862,14 @@ if __name__ == "__main__":
     
     def save_final_evaluation():
         final_summary = log_evaluation_summary()
+        print("\n========== FINAL EVALUATION SUMMARY ==========")
+        print(f"Total queries processed: {len(evaluation_data['queries'])}")
+        print(f"Total evaluation time: {(datetime.now() - datetime.fromisoformat(evaluation_data['start_time'])).total_seconds():.2f} seconds")
+        print("All metrics have been logged to the console during execution.")
+        print("==============================================\n")
+        
+        # Logge auch für Hugging Face
         eval_logger.info(f"FINAL_EVALUATION: {json.dumps(evaluation_data)}")
-        eval_logger.info(f"Evaluation completed with {len(evaluation_data['queries'])} queries.")
     
     atexit.register(save_final_evaluation)
     
